@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-BTC/USDT 多周期技术分析工具
+多币种多周期技术分析工具
 数据来源: Binance 公开 API
-周期: 15分钟 / 1小时 / 4小时 / 日线 / 周线
+周期: 15分钟 / 30分钟 / 1小时 / 2小时 / 4小时 / 8小时 / 日线 / 周线
 技术指标: MA/EMA, RSI, Bollinger Bands, MACD, KDJ, OBV, Fibonacci, 支撑/阻力
 输出: 交互式多标签 HTML 报告 + TXT 纯文本报告
 """
@@ -29,28 +29,33 @@ import ta
 # ─────────────────────────────────────────────
 
 TIMEFRAMES = [
-    # (interval, limit, label_cn, chart_show, sr_lookback, sr_pivot_n, fib_lookback)
-    ("15m", 500, "15分钟",  250, 100, 3,  30),
-    ("1h",  500, "1小时",   300, 200, 4,  72),
-    ("4h",  500, "4小时",   300, 200, 4,  90),
-    ("1d",  500, "日线",    300, 250, 5,  90),
-    ("1w",  200, "周线",    150, 100, 3,  52),
+    # (interval, limit, label_cn, chart_show, sr_lookback, sr_pivot_n, sr_cluster_pct, fib_lookback)
+    ("15m", 500, "15分钟",  250, 300, 3, 0.003, 50),
+    ("30m", 500, "30分钟",  280, 300, 3, 0.004, 80),
+    ("1h",  500, "1小时",   300, 300, 4, 0.006, 100),
+    ("2h",  500, "2小时",   300, 300, 4, 0.008, 120),
+    ("4h",  500, "4小时",   300, 300, 4, 0.010, 150),
+    ("8h",  500, "8小时",   300, 300, 4, 0.012, 150),
+    ("1d",  500, "日线",    300, 300, 5, 0.015, 150),
+    ("1w",  200, "周线",    150, 100, 3, 0.025, 52),
 ]
+
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 
 
 # ─────────────────────────────────────────────
 # A. 数据获取
 # ─────────────────────────────────────────────
 
-def fetch_btc_data(interval: str = "1d", limit: int = 500) -> pd.DataFrame:
-    """通过 Binance API 获取 BTC/USDT K 线数据"""
+def fetch_data(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) -> pd.DataFrame:
+    """通过 Binance API 获取 K 线数据"""
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": "BTCUSDT", "interval": interval, "limit": limit}
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
         resp = requests.get(url, params=params, timeout=20)
         resp.raise_for_status()
     except requests.RequestException as e:
-        print(f"[错误] 无法获取 {interval} 数据: {e}")
+        print(f"[错误] 无法获取 {symbol} {interval} 数据: {e}")
         return pd.DataFrame()
 
     raw = resp.json()
@@ -108,52 +113,78 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # C. 支撑 / 阻力识别
 # ─────────────────────────────────────────────
 
-def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5):
+def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5, cluster_pct: float = 0.015):
     recent = df.tail(lookback).copy()
     current_price = df["close"].iloc[-1]
 
-    pivot_highs, pivot_lows = [], []
+    # 1. 识别高低点 (Pivots) - 权重 1.0
+    raw_levels = []
     for i in range(pivot_n, len(recent) - pivot_n):
         w_h = recent["high"].iloc[i - pivot_n: i + pivot_n + 1]
         w_l = recent["low"].iloc[i - pivot_n: i + pivot_n + 1]
         if recent["high"].iloc[i] == w_h.max():
-            pivot_highs.append(recent["high"].iloc[i])
+            raw_levels.append((recent["high"].iloc[i], 1.0))
         if recent["low"].iloc[i] == w_l.min():
-            pivot_lows.append(recent["low"].iloc[i])
+            raw_levels.append((recent["low"].iloc[i], 1.0))
 
+    # 2. 识别成交量密集区 (Volume Profile) - 权重 2.0
     price_range = recent["close"].max() - recent["close"].min()
-    if price_range == 0:
-        return [], []
-    num_bins = 50
-    bins = np.linspace(recent["close"].min(), recent["close"].max(), num_bins + 1)
-    vol_profile = np.zeros(num_bins)
-    for _, row in recent.iterrows():
-        idx = min(int((row["close"] - recent["close"].min()) / price_range * num_bins), num_bins - 1)
-        vol_profile[idx] += row["volume"]
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    top_vol_idx = np.argsort(vol_profile)[-10:]
-    vol_levels  = bin_centers[top_vol_idx].tolist()
+    if price_range > 0:
+        num_bins = 50
+        bins = np.linspace(recent["close"].min(), recent["close"].max(), num_bins + 1)
+        vol_profile = np.zeros(num_bins)
+        for _, row in recent.iterrows():
+            idx = min(int((row["close"] - recent["close"].min()) / price_range * num_bins), num_bins - 1)
+            vol_profile[idx] += row["volume"]
+        
+        # 取成交量最大的前 15 个 bin 的中心价
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        top_vol_idx = np.argsort(vol_profile)[-15:]
+        for idx in top_vol_idx:
+            raw_levels.append((bin_centers[idx], 2.0))
 
-    all_highs = pivot_highs + [p for p in vol_levels if p > current_price]
-    all_lows  = pivot_lows  + [p for p in vol_levels if p < current_price]
-
-    def cluster_levels(levels, thr=0.015):
-        if not levels:
-            return []
-        levels = sorted(levels)
-        clusters, cur = [], [levels[0]]
-        for p in levels[1:]:
-            if abs(p - cur[-1]) / cur[-1] < thr:
-                cur.append(p)
+    # 3. 聚类合并
+    def cluster_levels(levels_with_weight, thr=0.015):
+        if not levels_with_weight: return []
+        # 按价格排序
+        levels_with_weight.sort(key=lambda x: x[0])
+        
+        clusters = []
+        current_cluster = [levels_with_weight[0]]
+        
+        for p, w in levels_with_weight[1:]:
+            last_p = current_cluster[-1][0]
+            if abs(p - last_p) / last_p < thr:
+                current_cluster.append((p, w))
             else:
-                clusters.append(np.mean(cur))
-                cur = [p]
-        clusters.append(np.mean(cur))
+                # 结算当前簇
+                prices = [x[0] for x in current_cluster]
+                weights = [x[1] for x in current_cluster]
+                avg_price = np.average(prices, weights=weights)
+                total_weight = sum(weights)
+                clusters.append((avg_price, total_weight))
+                current_cluster = [(p, w)]
+        
+        # 结算最后一个簇
+        prices = [x[0] for x in current_cluster]
+        weights = [x[1] for x in current_cluster]
+        avg_price = np.average(prices, weights=weights)
+        total_weight = sum(weights)
+        clusters.append((avg_price, total_weight))
+        
         return clusters
 
-    res = sorted(cluster_levels(all_highs), reverse=True)[:3]
-    sup = sorted(cluster_levels(all_lows))[-3:]
-    return [(p, 1.0) for p in sup], [(p, 1.0) for p in res]
+    consolidated = cluster_levels(raw_levels, thr=cluster_pct)
+
+    # 4. 区分支撑/阻力
+    supports    = [(p, w) for p, w in consolidated if p < current_price]
+    resistances = [(p, w) for p, w in consolidated if p > current_price]
+
+    # 5. 排序并取前5 (按距离排序)
+    supports = sorted(supports, key=lambda x: x[0], reverse=True)[:5]
+    resistances = sorted(resistances, key=lambda x: x[0])[:5]
+
+    return supports, resistances
 
 
 # ─────────────────────────────────────────────
@@ -176,7 +207,7 @@ def calculate_fibonacci(df: pd.DataFrame, lookback: int = 90):
 
 def create_chart(df: pd.DataFrame, supports, resistances,
                  fib_levels, fib_high, fib_low,
-                 tf_label: str = "", chart_show: int = 300):
+                 symbol: str = "BTC/USDT", tf_label: str = "", chart_show: int = 300):
     plot_df = df.tail(chart_show).copy()
 
     fig = make_subplots(
@@ -185,7 +216,7 @@ def create_chart(df: pd.DataFrame, supports, resistances,
         vertical_spacing=0.02,
         row_heights=[0.40, 0.12, 0.14, 0.12, 0.12, 0.10],
         subplot_titles=(
-            f"BTC/USDT {tf_label} K 线（均线 · 布林带 · 支撑/阻力 · Fibonacci）",
+            f"{symbol} {tf_label} K 线（均线 · 布林带 · 支撑/阻力 · Fibonacci）",
             "成交量 · OBV", "MACD（12,26,9）", "RSI（14）", "KDJ（9,3,3）", ""
         )
     )
@@ -287,7 +318,7 @@ def create_chart(df: pd.DataFrame, supports, resistances,
     fig.update_layout(
         template="plotly_dark",
         title=dict(
-            text=f"BTC/USDT {tf_label} 综合技术分析  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            text=f"{symbol} {tf_label} 综合技术分析  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             font=dict(size=15, color="#ffffff")
         ),
         height=1300,
@@ -308,7 +339,7 @@ def create_chart(df: pd.DataFrame, supports, resistances,
 # ─────────────────────────────────────────────
 
 def generate_report(df: pd.DataFrame, supports, resistances,
-                    fib_levels, tf_label: str = "", verbose: bool = True):
+                    fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -322,10 +353,10 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         lines.append(text)
 
     sep = "─" * 60
-    ts  = latest["date"].strftime("%Y-%m-%d %H:%M") if tf_label in ("15分钟","1小时","4小时") \
+    ts  = latest["date"].strftime("%Y-%m-%d %H:%M") if tf_label in ("15分钟","30分钟","1小时","2小时","4小时","8小时") \
           else latest["date"].strftime("%Y-%m-%d")
     emit(f"\n{'═'*60}")
-    emit(f"  BTC/USDT [{tf_label}] 技术分析报告  |  {ts}")
+    emit(f"  {symbol} [{tf_label}] 技术分析报告  |  {ts}")
     emit(f"  当前收盘价: ${price:,.2f}")
     emit(f"{'═'*60}\n")
     rd["date"]  = ts
@@ -436,16 +467,22 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     emit(f"\n【支撑 / 阻力位】{sep}")
     emit("  阻力位 (从近到远):")
     res_list = []
-    for pr, _ in sorted(resistances, key=lambda x: x[0]):
+    for pr, sr_score in sorted(resistances, key=lambda x: x[0]):
         dist = (pr - price) / price * 100
-        emit(f"    ${pr:>10,.2f}  距当前 +{dist:.2f}%")
-        res_list.append({"price": pr, "dist_pct": dist})
+        confidence = min(5.0, sr_score) 
+        stars = f"{confidence:.1f}"
+        emit(f"    ${pr:>10,.2f}  距当前 +{dist:.2f}%  强度:{stars} ({sr_score:.1f})")
+        res_list.append({"price": pr, "dist_pct": dist, "score": sr_score, "stars_val": confidence})
+        
     emit("  支撑位 (从近到远):")
     sup_list = []
-    for ps, _ in sorted(supports, key=lambda x: x[0], reverse=True):
+    for ps, sr_score in sorted(supports, key=lambda x: x[0], reverse=True):
         dist = (price - ps) / price * 100
-        emit(f"    ${ps:>10,.2f}  距当前 -{dist:.2f}%")
-        sup_list.append({"price": ps, "dist_pct": dist})
+        confidence = min(5.0, sr_score) 
+        stars = f"{confidence:.1f}"
+        emit(f"    ${ps:>10,.2f}  距当前 -{dist:.2f}%  强度:{stars} ({sr_score:.1f})")
+        sup_list.append({"price": ps, "dist_pct": dist, "score": sr_score, "stars_val": confidence})
+    
     rd["resistances"] = res_list
     rd["supports"]    = sup_list
 
@@ -462,14 +499,25 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     # ── 综合信号 ──
     max_score = 16
     emit(f"\n{'═'*60}")
-    if score >= 5:   overall = f"偏多头  (得分: {score:+d}/{max_score})"; oc = "#26a69a"
-    elif score <= -5: overall = f"偏空头  (得分: {score:+d}/{max_score})"; oc = "#ef5350"
-    else:            overall = f"中性震荡  (得分: {score:+d}/{max_score})"; oc = "#f9a825"
+    if score >= 5:   
+        overall = f"偏多头  (得分: {score:+d}/{max_score})"
+        oc = "#26a69a"
+        action = "做多 / 买入"
+    elif score <= -5: 
+        overall = f"偏空头  (得分: {score:+d}/{max_score})"
+        oc = "#ef5350"
+        action = "做空 / 卖出"
+    else:            
+        overall = f"中性震荡  (得分: {score:+d}/{max_score})"
+        oc = "#f9a825"
+        action = "观望 / 高抛低吸"
+
     emit(f"  综合信号: {overall}")
+    emit(f"  建议操作: {action}")
     emit(f"  多空强度: {'█'*max(0,score)}{'░'*max(0,-score)}")
     emit(f"{'═'*60}\n")
     rd.update({"score": score, "max_score": max_score, "overall": overall,
-               "overall_color": oc,
+               "overall_color": oc, "action": action,
                "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
 
     return score, "\n".join(lines), rd
@@ -479,9 +527,9 @@ def generate_report(df: pd.DataFrame, supports, resistances,
 # G. 导出 TXT 报告
 # ─────────────────────────────────────────────
 
-def export_txt_report(all_texts: list, filepath: str):
+def export_txt_report(all_texts: list, filepath: str, symbol: str = "BTCUSDT"):
     header = ("=" * 60 + "\n"
-              "  BTC/USDT 多周期技术分析报告\n"
+              f"  {symbol} 多周期技术分析报告\n"
               f"  生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
               "=" * 60 + "\n")
     with open(filepath, "w", encoding="utf-8") as f:
@@ -503,10 +551,16 @@ def build_summary_table(all_rd: list) -> str:
         if s < 0:  return "#ef5350"
         return "#f9a825"
 
-    header = "<tr><th>周期</th><th>价格</th><th>均线</th><th>RSI</th><th>布林带</th><th>MACD</th><th>KDJ</th><th>OBV</th><th>综合</th></tr>"
+    header = "<tr><th>周期</th><th>价格</th><th>均线</th><th>RSI</th><th>布林带</th><th>MACD</th><th>KDJ</th><th>OBV</th><th>综合</th><th>建议操作</th></tr>"
     rows = ""
     for rd in all_rd:
         ma_s  = sum(1 if m["above"] else -1 for m in rd["ma"])
+        
+        # Action Color
+        if rd["score"] >= 5: ac = "#26a69a"
+        elif rd["score"] <= -5: ac = "#ef5350"
+        else: ac = "#f9a825"
+
         rows += (
             f'<tr>'
             f'<td style="font-weight:700;color:#90caf9">{rd["tf"]}</td>'
@@ -520,31 +574,82 @@ def build_summary_table(all_rd: list) -> str:
             f'  {"↑ 流入" if rd["obv"]["up"] else "↓ 流出"}</td>'
             f'<td style="color:{rd["overall_color"]};font-weight:700">'
             f'  {rd["overall"].split("(")[0].strip()}</td>'
+            f'<td style="color:{ac};font-weight:700">{rd.get("action", "")}</td>'
             f'</tr>'
         )
     return f'<table><thead>{header}</thead><tbody>{rows}</tbody></table>'
 
 
 # ─────────────────────────────────────────────
-# I. 导出合并多标签 HTML 报告
+# I. 导出合并多标签 HTML 报告 (多币种支持)
 # ─────────────────────────────────────────────
 
-def build_combined_html(tf_results: list, filepath: str):
-    """
-    tf_results: [(tf_id, tf_label, fig, report_data), ...]
-    生成带标签页（Tab）的单 HTML 文件：顶部汇总 + 各周期详细卡片 + 图表
-    """
+def generate_symbol_html_content(symbol, tf_results, is_active=False):
+    """生成单个币种的 HTML 内容块"""
     all_rd = [rd for _, _, _, rd in tf_results]
-
+    summary_table = build_summary_table(all_rd)
+    
     # ── 各周期 Tab 内容 ──
     tab_buttons = ""
     tab_panels  = ""
+    
+    # 唯一ID前缀，避免不同币种冲突
+    prefix = symbol.replace("/", "").replace("-", "")
+
+    # ── 计算全局建议 ──
+    # 权重: 1w=2.0, 1d=1.5, 4h=1.2, others=1.0
+    w_map = {"1w": 2.0, "1d": 1.5, "4h": 1.2}
+    total_w_score = 0
+    total_weight = 0
+    for tf_id, _, _, rd in tf_results:
+        w = w_map.get(tf_id, 1.0)
+        total_w_score += rd["score"] * w
+        total_weight += w
+    
+    global_avg_score = total_w_score / total_weight if total_weight > 0 else 0
+    
+    if global_avg_score >= 4:
+        g_trend = "强力看涨 (Bullish)"
+        g_action = "建议分批建仓 / 持有"
+        g_color = "#26a69a"
+    elif global_avg_score >= 1:
+        g_trend = "偏多震荡 (Weak Bullish)"
+        g_action = "逢低做多"
+        g_color = "#66bb6a"
+    elif global_avg_score <= -4:
+        g_trend = "强力看跌 (Bearish)"
+        g_action = "清仓 / 做空"
+        g_color = "#ef5350"
+    elif global_avg_score <= -1:
+        g_trend = "偏空震荡 (Weak Bearish)"
+        g_action = "逢高做空 / 减仓"
+        g_color = "#ff7043"
+    else:
+        g_trend = "横盘整理 (Neutral)"
+        g_action = "观望 / 区间操作"
+        g_color = "#f9a825"
+
+    global_summary_html = f"""
+    <div class="card" style="margin-bottom:15px; border-left: 5px solid {g_color}">
+        <h2 style="font-size:14px; color:#d1d4dc; margin-bottom:5px">全局趋势分析汇总 (加权评分: {global_avg_score:+.1f})</h2>
+        <div style="display:flex; gap:20px; align-items:center">
+            <div style="font-size:18px; font-weight:700; color:{g_color}">{g_trend}</div>
+            <div style="font-size:14px; color:#90a4ae">操作建议: <span style="color:#fff; font-weight:600">{g_action}</span></div>
+        </div>
+    </div>
+    """
 
     for i, (tf_id, tf_label, fig, rd) in enumerate(tf_results):
-        active_btn   = "active" if i == 3 else ""  # 默认选中日线(index 3)
-        active_panel = "active" if i == 3 else ""
+        # 默认选中日线，如果找不到则选第一个
+        active_btn   = "active" if tf_id == '1d' else ""
+        active_panel = "active" if tf_id == '1d' else ""
+        if "active" not in tab_buttons and i == len(tf_results)-1 and not active_btn:
+             active_btn = "active"
+             active_panel = "active"
 
-        chart_html = fig.to_html(full_html=False, include_plotlyjs=("cdn" if i == 0 else False))
+        # 仅第一个币种的第一个图表包含 Plotly JS (CDN)，减少重复
+        include_plotlyjs = False # 我们将在 HTML 头部统一引入 Plotly JS，这里不再嵌入
+        chart_html = fig.to_html(full_html=False, include_plotlyjs=False)
 
         def sc(s):
             return "#26a69a" if s > 0 else ("#ef5350" if s < 0 else "#f9a825")
@@ -571,13 +676,15 @@ def build_combined_html(tf_results: list, filepath: str):
         res_rows = "".join(
             f'<tr><td style="color:#ef5350">阻力</td>'
             f'<td>${r["price"]:,.2f}</td>'
-            f'<td style="color:#ef5350">+{r["dist_pct"]:.2f}%</td></tr>'
+            f'<td style="color:#ef5350">+{r["dist_pct"]:.2f}%</td>'
+            f'<td style="letter-spacing:1px"><span class="stars" style="--rating:{r["stars_val"]}"></span> <span style="font-size:11px;color:#78909c">({r["score"]:.1f})</span></td></tr>'
             for r in rd["resistances"]
         )
         sup_rows = "".join(
             f'<tr><td style="color:#26a69a">支撑</td>'
             f'<td>${s["price"]:,.2f}</td>'
-            f'<td style="color:#26a69a">-{s["dist_pct"]:.2f}%</td></tr>'
+            f'<td style="color:#26a69a">-{s["dist_pct"]:.2f}%</td>'
+            f'<td style="letter-spacing:1px"><span class="stars" style="--rating:{s["stars_val"]}"></span> <span style="font-size:11px;color:#78909c">({s["score"]:.1f})</span></td></tr>'
             for s in rd["supports"]
         )
 
@@ -592,10 +699,12 @@ def build_combined_html(tf_results: list, filepath: str):
 
         ma_score_total = sum(1 if m["above"] else -1 for m in rd["ma"])
 
-        tab_buttons += f'<button class="tab-btn {active_btn}" onclick="switchTab(event,\'{tf_id}\')">{tf_label}</button>\n'
+        # Tab Button
+        tab_buttons += f'<button class="tab-btn {active_btn}" onclick="switchTab(event, \'{prefix}\', \'{tf_id}\')">{tf_label}</button>\n'
 
+        # Panel Content
         tab_panels += f'''
-<div id="panel-{tf_id}" class="tab-panel {active_panel}">
+<div id="panel-{prefix}-{tf_id}" class="tab-panel {active_panel}">
   <div class="grid">
     <div class="card">
       <h2>均线系统</h2>
@@ -649,7 +758,7 @@ def build_combined_html(tf_results: list, filepath: str):
     </div>
     <div class="card">
       <h2>支撑 / 阻力位</h2>
-      <table><tr><th>类型</th><th>价格</th><th>距当前</th></tr>
+      <table><tr><th>类型</th><th>价格</th><th>距当前</th><th>强度</th></tr>
       {res_rows}{sup_rows}</table>
     </div>
     <div class="card">
@@ -685,21 +794,75 @@ def build_combined_html(tf_results: list, filepath: str):
 </div>
 '''
 
-    summary_table = build_summary_table(all_rd)
+    display_style = "block" if is_active else "none"
+    
+    return f"""
+    <div id="container-{symbol}" class="symbol-container" style="display:{display_style}">
+        <div class="page-header">
+            <div class="price-tag">${all_rd[3]["price"]:,.2f} <span style="font-size:13px;color:#90a4ae">日线收盘</span></div>
+            <div style="color:#78909c;font-size:12px;margin-left:auto">数据来源: Binance API | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        </div>
+
+        <!-- 全局汇总 -->
+        {global_summary_html}
+
+        <!-- 多周期汇总 -->
+        <div class="summary-wrap">
+          <div class="summary-title">多周期信号一览 ({symbol})</div>
+          {summary_table}
+        </div>
+
+        <!-- 标签栏 -->
+        <div class="tab-bar">
+        {tab_buttons}
+        </div>
+
+        <!-- 各周期面板 -->
+        {tab_panels}
+    </div>
+    """
+
+
+def build_multisymbol_html(all_results: dict, filepath: str):
+    """
+    all_results: { "BTCUSDT": [(tf_id, tf_label, fig, rd), ...], "ETHUSDT": ... }
+    """
+    
+    # 生成各币种的 HTML 内容
+    symbols_html = ""
+    symbol_options = ""
+    
+    first_symbol = True
+    for symbol in SYMBOLS:
+        if symbol not in all_results:
+            continue
+            
+        is_active = first_symbol
+        symbols_html += generate_symbol_html_content(symbol, all_results[symbol], is_active)
+        
+        selected = "selected" if is_active else ""
+        symbol_options += f'<option value="{symbol}" {selected}>{symbol}</option>'
+        first_symbol = False
 
     html = f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BTC/USDT 多周期技术分析  {datetime.now().strftime('%Y-%m-%d %H:%M')}</title>
+  <title>多币种多周期技术分析报告 {datetime.now().strftime('%Y-%m-%d')}</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ background: #0e1117; color: #d1d4dc; font-family: 'Segoe UI','PingFang SC',sans-serif; font-size: 13px; }}
-    h1   {{ font-size: 20px; font-weight: 600; color: #fff; }}
+    h1   {{ font-size: 20px; font-weight: 600; color: #fff; margin: 0; }}
     h2   {{ font-size: 12px; font-weight: 600; color: #90a4ae; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 8px; }}
+    
+    .top-nav {{ background: #131722; border-bottom: 1px solid #2a2e39; padding: 10px 28px; display: flex; align-items: center; gap: 20px; }}
+    .symbol-select {{ background: #0e1117; border: 1px solid #2a2e39; color: #fff; padding: 6px 12px; border-radius: 4px; font-size: 16px; font-weight: 600; cursor: pointer; outline: none; }}
+    .symbol-select:hover {{ border-color: #546e7a; }}
+
     .page-header {{ background: linear-gradient(90deg,#131722,#1a2035); border-bottom: 1px solid #2a2e39; padding: 16px 28px; display: flex; align-items: center; gap: 20px; }}
-    .price-tag   {{ font-size: 26px; font-weight: 700; color: #fff; margin-left: auto; }}
+    .price-tag   {{ font-size: 26px; font-weight: 700; color: #fff; }}
     .date-tag    {{ color: #78909c; font-size: 12px; margin-top: 2px; }}
 
     /* 汇总表 */
@@ -734,43 +897,81 @@ def build_combined_html(tf_results: list, filepath: str):
     .bar-label    {{ font-size: 11px; color: #546e7a; }}
     .chart-wrap   {{ padding: 0 28px 28px; }}
     .divider      {{ border: none; border-top: 1px solid #2a2e39; margin: 0 28px; }}
+    
+    .stars {{
+        display: inline-block;
+        font-family: 'Times New Roman', serif;
+        line-height: 1;
+        font-size: 14px;
+        position: relative;
+    }}
+    .stars::before {{
+        content: '★★★★★';
+        background: linear-gradient(90deg, #ffd54f calc(var(--rating) / 5 * 100%), #454545 calc(var(--rating) / 5 * 100%));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent; /* Fallback for non-webkit */
+    }}
   </style>
 </head>
 <body>
 
-<div class="page-header">
-  <div>
-    <h1>BTC/USDT &nbsp; 多周期技术分析报告</h1>
-    <div class="date-tag">生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp; 来源: Binance API</div>
+<div class="top-nav">
+  <h1>多币种技术分析报告</h1>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+    <label for="symbolSelect" style="color:#78909c">选择币种:</label>
+    <select id="symbolSelect" class="symbol-select" onchange="switchSymbol(this.value)">
+      {symbol_options}
+    </select>
   </div>
-  <div class="price-tag">${all_rd[3]["price"]:,.2f} <span style="font-size:13px;color:#90a4ae">日线收盘</span></div>
 </div>
 
-<!-- 多周期汇总 -->
-<div class="summary-wrap">
-  <div class="summary-title">多周期信号一览</div>
-  {summary_table}
-</div>
-
-<!-- 标签栏 -->
-<div class="tab-bar">
-{tab_buttons}
-</div>
-
-<!-- 各周期面板 -->
-{tab_panels}
+{symbols_html}
 
 <script>
-function switchTab(evt, tfId) {{
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  evt.target.classList.add('active');
-  document.getElementById('panel-' + tfId).classList.add('active');
-  // 触发 Plotly resize 以修复图表宽度
-  setTimeout(function() {{
-    var plots = document.getElementById('panel-' + tfId).querySelectorAll('.plotly-graph-div');
-    plots.forEach(function(p) {{ if (window.Plotly) Plotly.Plots.resize(p); }});
-  }}, 50);
+function switchSymbol(symbol) {{
+    // 隐藏所有容器
+    document.querySelectorAll('.symbol-container').forEach(el => el.style.display = 'none');
+    // 显示选中容器
+    const target = document.getElementById('container-' + symbol);
+    if (target) {{
+        target.style.display = 'block';
+        // 触发 Plotly resize
+        setTimeout(() => {{
+            target.querySelectorAll('.plotly-graph-div').forEach(p => {{
+                if (window.Plotly) Plotly.Plots.resize(p);
+            }});
+        }}, 50);
+    }}
+}}
+
+function switchTab(evt, symbolPrefix, tfId) {{
+    // 找到当前币种容器下的所有 tab-btn 和 tab-panel
+    // 由于 ID 是唯一的 (panel-prefix-tfId)，我们只需要操作对应 ID
+    // 但为了样式 active 切换，我们需要找到同组的 tabs
+    
+    // 更好的方式：通过 event.target 找到父级 tab-bar，然后处理兄弟元素
+    const btn = evt.target;
+    const tabBar = btn.parentElement;
+    const container = tabBar.parentElement;
+    
+    // 移除该容器内所有 tab-btn 的 active
+    tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    // 移除该容器内所有 tab-panel 的 active
+    container.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    
+    // 激活当前
+    btn.classList.add('active');
+    const panelId = 'panel-' + symbolPrefix + '-' + tfId;
+    const panel = document.getElementById(panelId);
+    if (panel) {{
+        panel.classList.add('active');
+        // Resize chart
+        setTimeout(() => {{
+             const plots = panel.querySelectorAll('.plotly-graph-div');
+             plots.forEach(p => {{ if (window.Plotly) Plotly.Plots.resize(p); }});
+        }}, 50);
+    }}
 }}
 </script>
 </body>
@@ -778,7 +979,7 @@ function switchTab(evt, tfId) {{
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"[导出] 完整多周期报告已保存: {filepath}")
+    print(f"[导出] 完整多币种报告已保存: {filepath}")
 
 
 # ─────────────────────────────────────────────
@@ -787,56 +988,76 @@ function switchTab(evt, tfId) {{
 
 def main():
     print("=" * 60)
-    print("  BTC/USDT 多周期技术分析工具")
-    print("  周期: 15分钟 / 1小时 / 4小时 / 日线 / 周线")
+    print("  多币种多周期技术分析工具")
+    print("  支持币种: " + ", ".join(SYMBOLS))
     print("=" * 60)
+    
+    all_results = {}  # { "BTCUSDT": [...], ... }
 
-    tf_results  = []   # [(tf_id, tf_label, fig, rd), ...]
-    all_texts   = []   # [(tf_label, report_text), ...]
+    # 依次分析所有币种
+    for symbol in SYMBOLS:
+        print(f"\n{'='*30}\n  开始分析: {symbol}\n{'='*30}")
+        
+        try:
+            tf_results  = []   # [(tf_id, tf_label, fig, rd), ...]
+            all_texts   = []   # [(tf_label, report_text), ...]
 
-    for interval, limit, label, chart_show, sr_lb, sr_pn, fib_lb in TIMEFRAMES:
-        print(f"\n[{label}] 正在获取数据...")
-        df = fetch_btc_data(interval=interval, limit=limit)
-        if df.empty:
-            print(f"[{label}] 跳过（数据获取失败）")
+            for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
+                print(f"[{symbol}] [{label}] 正在获取数据...")
+                df = fetch_data(symbol=symbol, interval=interval, limit=limit)
+                if df.empty:
+                    print(f"[{symbol}] [{label}] 跳过（数据获取失败）")
+                    continue
+
+                print(f"[{symbol}] [{label}] 最新: {df['date'].iloc[-1].strftime('%Y-%m-%d %H:%M')}")
+                df = calculate_indicators(df)
+                supports, resistances = find_support_resistance(df, lookback=sr_lb, pivot_n=sr_pn, cluster_pct=sr_cluster_pct)
+                fib_levels, fib_high, fib_low = calculate_fibonacci(df, lookback=fib_lb)
+
+                # print(f"[{symbol}] [{label}] 正在分析...")
+                score, report_text, rd = generate_report(
+                    df, supports, resistances, fib_levels, symbol=symbol, tf_label=label, verbose=False
+                )
+                all_texts.append((label, report_text))
+
+                # print(f"[{symbol}] [{label}] 正在生成图表...")
+                fig = create_chart(df, supports, resistances, fib_levels, fib_high, fib_low,
+                                   symbol=symbol, tf_label=label, chart_show=chart_show)
+                tf_results.append((interval, label, fig, rd))
+
+                # 避免触发 Binance 速率限制
+                time.sleep(0.1)
+
+            if tf_results:
+                all_results[symbol] = tf_results
+                
+                # 导出单个币种的 TXT
+                os.makedirs("output", exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                txt_path  = f"output/{symbol}_report_{ts}.txt"
+                export_txt_report(all_texts, txt_path, symbol=symbol)
+            else:
+                print(f"[错误] {symbol} 所有周期数据获取失败")
+        
+        except Exception as e:
+            print(f"[异常] 分析 {symbol} 时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
-        print(f"[{label}] 获取 {len(df)} 根K线，最新: {df['date'].iloc[-1].strftime('%Y-%m-%d %H:%M')}")
-        df = calculate_indicators(df)
-        supports, resistances = find_support_resistance(df, lookback=sr_lb, pivot_n=sr_pn)
-        fib_levels, fib_high, fib_low = calculate_fibonacci(df, lookback=fib_lb)
-
-        print(f"[{label}] 正在分析...")
-        score, report_text, rd = generate_report(
-            df, supports, resistances, fib_levels, tf_label=label
-        )
-        all_texts.append((label, report_text))
-
-        print(f"[{label}] 正在生成图表...")
-        fig = create_chart(df, supports, resistances, fib_levels, fib_high, fib_low,
-                           tf_label=label, chart_show=chart_show)
-        tf_results.append((interval, label, fig, rd))
-
-        # 避免触发 Binance 速率限制
-        time.sleep(0.3)
-
-    if not tf_results:
-        print("[错误] 所有周期数据获取失败，请检查网络连接")
+    if not all_results:
+        print("[错误] 没有获取到任何数据")
         return
 
-    # 导出文件
+    # 导出合并 HTML
     os.makedirs("output", exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M")
+    html_path = f"output/multisymbol_report_{ts}.html"
 
-    txt_path  = f"output/btc_report_{ts}.txt"
-    html_path = f"output/btc_report_{ts}.html"
+    print(f"\n正在生成合并 HTML 报告...")
+    build_multisymbol_html(all_results, html_path)
 
-    export_txt_report(all_texts, txt_path)
-    build_combined_html(tf_results, html_path)
-
-    print(f"\n[完成] 输出文件:")
-    print(f"  文本报告: {txt_path}")
-    print(f"  完整报告: {html_path}")
+    print(f"\n[完成] 报告已生成: {html_path}")
     print("[报告] 正在浏览器中打开...")
 
     import webbrowser, pathlib

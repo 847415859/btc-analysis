@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BTC/USDT 实时技术分析</title>
+<title>多币种实时技术分析</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <style>
 :root {
@@ -31,8 +31,13 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
   padding: 10px 20px;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
 }
-.header-logo { font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -.3px; }
-.header-logo span { color: var(--neutral); }
+.header-logo { font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -.3px; display: flex; align-items: center; gap: 10px; }
+.symbol-select {
+  background: var(--bg); border: 1px solid var(--border); color: #fff;
+  padding: 4px 8px; border-radius: 4px; font-size: 14px; font-weight: 600;
+  outline: none; cursor: pointer;
+}
+.symbol-select:hover { border-color: var(--text3); }
 .price-main { font-size: 28px; font-weight: 700; color: #fff; margin-left: 6px; }
 .price-change { font-size: 14px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
 .price-change.up   { background: rgba(38,166,154,.15); color: var(--bull); }
@@ -139,7 +144,9 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
 
 <!-- ── 顶部 ── -->
 <div class="header">
-  <div class="header-logo">BTC<span>/USDT</span></div>
+  <div class="header-logo">
+    <select id="symbolSelect" class="symbol-select"></select>
+  </div>
   <div id="priceMain" class="price-main">--</div>
   <div id="priceChange" class="price-change">--</div>
   <div class="header-stats">
@@ -194,10 +201,13 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
 // ─────────────────────────────────────────────
 // 配置
 // ─────────────────────────────────────────────
-const TF_LIST   = ['15m','1h','4h','1d','1w'];
-const TF_LABELS = {'15m':'15分钟','1h':'1小时','4h':'4小时','1d':'日线','1w':'周线'};
-let currentTf   = '1d';
-let analysisData = {};       // 最新分析结果
+const SYMBOLS   = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+const TF_LIST   = ['15m','30m','1h','2h','4h','8h','1d','1w'];
+const TF_LABELS = {'15m':'15分钟','30m':'30分钟','1h':'1小时','2h':'2小时','4h':'4小时','8h':'8小时','1d':'日线','1w':'周线'};
+
+let currentTf     = '1d';
+let currentSymbol = 'BTCUSDT';
+let analysisData  = {};       // 最新分析结果
 let chartRendered = false;
 
 // ─────────────────────────────────────────────
@@ -209,13 +219,54 @@ const sc   = s  => s > 0 ? 'bull' : (s < 0 ? 'bear' : 'neutral');
 const noNaN = arr => arr.map(v => (v == null || isNaN(v)) ? null : v);
 
 // ─────────────────────────────────────────────
+// 初始化下拉框
+// ─────────────────────────────────────────────
+function initSymbolSelect() {
+  const sel = document.getElementById('symbolSelect');
+  SYMBOLS.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s;
+    sel.appendChild(opt);
+  });
+  sel.value = currentSymbol;
+  sel.onchange = (e) => {
+    currentSymbol = e.target.value;
+    resetData();
+    fetchPrice();
+    fetchAnalysisAndUpdate();
+  };
+}
+
+function resetData() {
+  analysisData = {};
+  document.getElementById('priceMain').textContent = '--';
+  document.getElementById('priceChange').textContent = '--';
+  document.getElementById('h24').textContent = '--';
+  document.getElementById('l24').textContent = '--';
+  document.getElementById('vol24').textContent = '--';
+  document.getElementById('lastUpdateTime').textContent = '切换中...';
+  document.getElementById('summaryChips').innerHTML = '';
+  document.getElementById('sidebar').innerHTML = `
+    <div class="loading" id="sidebarLoading">
+      <div class="spinner"></div>
+      <div>正在加载分析数据...</div>
+    </div>`;
+  // 重置图表
+  const chartLoading = document.getElementById('chartLoading');
+  if (chartLoading) chartLoading.style.display = 'flex';
+}
+
+// ─────────────────────────────────────────────
 // 实时价格（每10秒）
 // ─────────────────────────────────────────────
 async function fetchPrice() {
   try {
-    const r = await fetch('/api/price');
+    const r = await fetch(`/api/price?symbol=${currentSymbol}`);
     if (!r.ok) return;
     const d = await r.json();
+    if (d.symbol !== currentSymbol) return; // 防止快速切换导致的数据错乱
+
     document.getElementById('priceMain').textContent = fmt(d.price);
     const chg = d.change_pct;
     const el  = document.getElementById('priceChange');
@@ -253,15 +304,17 @@ let _lastUpdate = null;
 
 async function pollStatus() {
   try {
-    const r = await fetch('/api/status');
+    const r = await fetch(`/api/status?symbol=${currentSymbol}`);
     const d = await r.json();
+    if (d.symbol !== currentSymbol) return;
+
     document.getElementById('updatingDot').classList.toggle('active', d.updating);
     startCountdown(d.seconds_remaining);
-    if (d.last_update && d.last_update !== _lastUpdate) {
+    
+    // 如果后端数据更新了，或者前端还没准备好
+    if ((d.last_update && d.last_update !== _lastUpdate) || (d.ready && !analysisData._ready)) {
       _lastUpdate = d.last_update;
-      document.getElementById('lastUpdateTime').textContent = '更新于 ' + d.last_update;
-      await fetchAnalysisAndUpdate();
-    } else if (!analysisData._ready && d.ready) {
+      if(d.last_update) document.getElementById('lastUpdateTime').textContent = '更新于 ' + d.last_update;
       await fetchAnalysisAndUpdate();
     }
   } catch(e) { console.warn('status poll failed', e); }
@@ -272,9 +325,11 @@ async function pollStatus() {
 // ─────────────────────────────────────────────
 async function fetchAnalysisAndUpdate() {
   try {
-    const r = await fetch('/api/analysis');
+    const r = await fetch(`/api/analysis?symbol=${currentSymbol}`);
     const d = await r.json();
+    if (d.symbol !== currentSymbol) return;
     if (!d.ready) return;
+
     analysisData = d.timeframes;
     analysisData._ready = true;
     updateSummaryChips();
@@ -476,7 +531,7 @@ async function fetchKlinesAndRender(tf) {
   if (loading) loading.style.display = 'flex';
   if (status)  status.textContent = '加载中...';
   try {
-    const r = await fetch(`/api/klines/${tf}`);
+    const r = await fetch(`/api/klines/${tf}?symbol=${currentSymbol}`);
     if (!r.ok) {
       if (status) status.textContent = '数据未就绪';
       if (loading) loading.style.display = 'none';
@@ -498,121 +553,160 @@ async function fetchKlinesAndRender(tf) {
 // Plotly 图表渲染
 // ─────────────────────────────────────────────
 function renderChart(candles, supports, resistances, fib, tf) {
-  const T  = candles.map(c => c.t);
-  const O  = candles.map(c => c.o);
-  const H  = candles.map(c => c.h);
-  const L  = candles.map(c => c.l);
-  const C  = candles.map(c => c.c);
-  const V  = candles.map(c => c.v);
+  const T = candles.map(c => c.t);
+  const O = candles.map(c => c.o);
+  const H = candles.map(c => c.h);
+  const L = candles.map(c => c.l);
+  const C = candles.map(c => c.c);
+  const V = candles.map(c => c.v);
 
   const get = key => noNaN(candles.map(c => c[key]));
-  const volColors = candles.map((c,i) => c.c >= c.o ? '#26a69a' : '#ef5350');
+  const volColors      = candles.map(c => c.c >= c.o ? '#26a69a' : '#ef5350');
   const macdHistColors = candles.map(c => (c.macd_hist||0) >= 0 ? '#26a69a' : '#ef5350');
 
-  // 支撑/阻力 shapes
+  // ── 计算 K 线价格范围，用于 Y 轴固定区间（避免 Fib 把范围拉太远）──
+  const validH = H.filter(v => v != null && !isNaN(v));
+  const validL = L.filter(v => v != null && !isNaN(v));
+  const pMin = Math.min(...validL);
+  const pMax = Math.max(...validH);
+  const pad  = (pMax - pMin) * 0.05;     // 上下各留 5% 空间
+  const yMin = pMin - pad;
+  const yMax = pMax + pad;
+
+  // ── 只保留价格在可视范围内（±10%）的 S/R 和 Fib 线 ──
+  const visRange = (pMax - pMin) * 0.10;
+  const inView   = price => price >= (yMin - visRange) && price <= (yMax + visRange);
+
   const shapes = [];
   const anns   = [];
-  const x0 = T[0], x1 = T[T.length-1];
+  const x0 = T[0], x1 = T[T.length - 1];
 
-  (resistances||[]).forEach(r => {
-    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:r.price,y1:r.price,
-      line:{color:'rgba(239,83,80,0.6)',width:1.2,dash:'dot'}});
-    anns.push({xref:'x',yref:'y',x:x1,y:r.price,text:` 阻力 $${Math.round(r.price).toLocaleString()}`,
-      showarrow:false,font:{color:'#ef5350',size:10},xanchor:'left'});
+  // 支撑/阻力
+  (resistances||[]).filter(r => inView(r.price)).forEach(r => {
+    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:r.price, y1:r.price,
+      line:{color:'rgba(239,83,80,0.7)', width:1.2, dash:'dot'}});
+    anns.push({xref:'paper', yref:'y', x:1.01, y:r.price,
+      text:`阻 ${Math.round(r.price).toLocaleString()}`,
+      showarrow:false, font:{color:'#ef5350', size:10}, xanchor:'left'});
   });
-  (supports||[]).forEach(s => {
-    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:s.price,y1:s.price,
-      line:{color:'rgba(38,166,154,0.6)',width:1.2,dash:'dot'}});
-    anns.push({xref:'x',yref:'y',x:x1,y:s.price,text:` 支撑 $${Math.round(s.price).toLocaleString()}`,
-      showarrow:false,font:{color:'#26a69a',size:10},xanchor:'left'});
+  (supports||[]).filter(s => inView(s.price)).forEach(s => {
+    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:s.price, y1:s.price,
+      line:{color:'rgba(38,166,154,0.7)', width:1.2, dash:'dot'}});
+    anns.push({xref:'paper', yref:'y', x:1.01, y:s.price,
+      text:`撑 ${Math.round(s.price).toLocaleString()}`,
+      showarrow:false, font:{color:'#26a69a', size:10}, xanchor:'left'});
   });
 
-  // Fibonacci shapes
+  // Fibonacci（仅显示在可视范围内的位）
   const fibColors = ['#b0bec5','#80cbc4','#ffcc02','#ff9800','#ff5722','#e91e63','#9c27b0'];
-  const sortedFib = [...(fib||[])].sort((a,b) => b.price - a.price);
+  const sortedFib = [...(fib||[])].sort((a,b) => b.price - a.price).filter(f => inView(f.price));
   sortedFib.forEach((f, i) => {
     const fc = fibColors[i % fibColors.length];
-    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:f.price,y1:f.price,
-      line:{color:fc,width:0.7,dash:'dash'}});
-    anns.push({xref:'x',yref:'y',
-      x:T[Math.floor(T.length*0.03)], y:f.price,
-      text:`${f.label} $${Math.round(f.price).toLocaleString()}`,
-      showarrow:false,font:{color:fc,size:9},xanchor:'left'});
+    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:f.price, y1:f.price,
+      line:{color:fc, width:0.8, dash:'dash'}});
+    anns.push({xref:'paper', yref:'y', x:0, y:f.price,
+      text:f.label, showarrow:false,
+      font:{color:fc, size:9}, xanchor:'right'});
   });
 
-  // RSI shapes
-  ['rsi','rsi2'].forEach((_,i) => {
-    const lv = i === 0 ? 70 : 30;
-    shapes.push({type:'line',xref:'x4',yref:'y4',x0,x1,y0:lv,y1:lv,
-      line:{color: lv===70?'rgba(239,83,80,0.35)':'rgba(38,166,154,0.35)',width:1,dash:'dash'}});
+  // RSI 超买/超卖线
+  [70, 30].forEach(lv => {
+    shapes.push({type:'line', xref:'x4', yref:'y4', x0, x1, y0:lv, y1:lv,
+      line:{color:lv===70?'rgba(239,83,80,0.4)':'rgba(38,166,154,0.4)', width:1, dash:'dash'}});
   });
-  // KDJ shapes
-  [80,20].forEach(lv => {
-    shapes.push({type:'line',xref:'x5',yref:'y5',x0,x1,y0:lv,y1:lv,
-      line:{color:'rgba(255,255,255,0.12)',width:1,dash:'dash'}});
+  // KDJ 超买/超卖线
+  [80, 20].forEach(lv => {
+    shapes.push({type:'line', xref:'x5', yref:'y5', x0, x1, y0:lv, y1:lv,
+      line:{color:'rgba(255,255,255,0.15)', width:1, dash:'dash'}});
   });
 
   const traces = [
-    // ─ Row1: K线
-    {type:'candlestick',x:T,open:O,high:H,low:L,close:C,name:'K线',
-     increasing:{line:{color:'#26a69a'}},decreasing:{line:{color:'#ef5350'}},
-     xaxis:'x',yaxis:'y',showlegend:false},
-    {type:'scatter',x:T,y:get('ma20'),  name:'MA20',  line:{color:'#f9a825',width:1},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('ma50'),  name:'MA50',  line:{color:'#ab47bc',width:1},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('ma200'), name:'MA200', line:{color:'#ef5350',width:1},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('ema20'), name:'EMA20', line:{color:'#29b6f6',width:1,dash:'dot'},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('ema50'), name:'EMA50', line:{color:'#66bb6a',width:1,dash:'dot'},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('bb_upper'),name:'BB上轨',line:{color:'rgba(100,181,246,.5)',width:1,dash:'dash'},xaxis:'x',yaxis:'y'},
-    {type:'scatter',x:T,y:get('bb_lower'),name:'BB下轨',line:{color:'rgba(100,181,246,.5)',width:1,dash:'dash'},
-     fill:'tonexty',fillcolor:'rgba(100,181,246,0.04)',xaxis:'x',yaxis:'y'},
+    // ─ Row1: K线 + 均线 + 布林带
+    {type:'candlestick', x:T, open:O, high:H, low:L, close:C, name:'K线',
+     increasing:{line:{color:'#26a69a'}, fillcolor:'rgba(38,166,154,0.75)'},
+     decreasing:{line:{color:'#ef5350'}, fillcolor:'rgba(239,83,80,0.75)'},
+     xaxis:'x', yaxis:'y', showlegend:false, line:{width:1}},
 
-    // ─ Row2: 成交量 + OBV
-    {type:'bar',x:T,y:V,name:'成交量',marker:{color:volColors},xaxis:'x2',yaxis:'y2',showlegend:false,opacity:.7},
-    {type:'scatter',x:T,y:get('obv'),name:'OBV',line:{color:'#ffb300',width:1.5},xaxis:'x2',yaxis:'y2b'},
+    {type:'scatter', x:T, y:get('ma20'),  name:'MA20',  line:{color:'#f9a825',width:1.2}, xaxis:'x', yaxis:'y'},
+    {type:'scatter', x:T, y:get('ma50'),  name:'MA50',  line:{color:'#ab47bc',width:1.2}, xaxis:'x', yaxis:'y'},
+    {type:'scatter', x:T, y:get('ma200'), name:'MA200', line:{color:'#ef5350',width:1.2}, xaxis:'x', yaxis:'y'},
+    {type:'scatter', x:T, y:get('ema20'), name:'EMA20', line:{color:'#29b6f6',width:1,dash:'dot'}, xaxis:'x', yaxis:'y'},
+    {type:'scatter', x:T, y:get('ema50'), name:'EMA50', line:{color:'#66bb6a',width:1,dash:'dot'}, xaxis:'x', yaxis:'y'},
 
-    // ─ Row3: MACD
-    {type:'bar',x:T,y:get('macd_hist'),name:'MACD柱',marker:{color:macdHistColors},xaxis:'x3',yaxis:'y3',showlegend:false},
-    {type:'scatter',x:T,y:get('macd'),       name:'MACD',   line:{color:'#29b6f6',width:1.5},xaxis:'x3',yaxis:'y3'},
-    {type:'scatter',x:T,y:get('macd_signal'),name:'信号线',  line:{color:'#ff7043',width:1.5},xaxis:'x3',yaxis:'y3'},
+    {type:'scatter', x:T, y:get('bb_upper'), name:'BB上', line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'}, xaxis:'x', yaxis:'y', showlegend:false},
+    {type:'scatter', x:T, y:get('bb_lower'), name:'BB下', line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},
+     fill:'tonexty', fillcolor:'rgba(100,181,246,0.04)', xaxis:'x', yaxis:'y', showlegend:false},
 
-    // ─ Row4: RSI
-    {type:'scatter',x:T,y:get('rsi'),name:'RSI(14)',line:{color:'#ce93d8',width:1.5},xaxis:'x4',yaxis:'y4'},
+    // ─ Row2: 成交量（独立Y轴，不叠加OBV避免刻度混乱）
+    {type:'bar', x:T, y:V, name:'成交量', marker:{color:volColors}, xaxis:'x2', yaxis:'y2', showlegend:false, opacity:0.75},
 
-    // ─ Row5: KDJ
-    {type:'scatter',x:T,y:get('kdj_k'),name:'K',line:{color:'#66bb6a',width:1.2},xaxis:'x5',yaxis:'y5'},
-    {type:'scatter',x:T,y:get('kdj_d'),name:'D',line:{color:'#ef5350',width:1.2},xaxis:'x5',yaxis:'y5'},
-    {type:'scatter',x:T,y:get('kdj_j'),name:'J',line:{color:'#ffb300',width:1.2,dash:'dot'},xaxis:'x5',yaxis:'y5'},
+    // ─ Row3: OBV（独立面板，归一化展示）
+    {type:'scatter', x:T, y:get('obv'), name:'OBV', line:{color:'#ffb300',width:1.5}, xaxis:'x3', yaxis:'y3'},
+
+    // ─ Row4: MACD
+    {type:'bar',     x:T, y:get('macd_hist'),    name:'MACD柱', marker:{color:macdHistColors}, xaxis:'x4', yaxis:'y4', showlegend:false},
+    {type:'scatter', x:T, y:get('macd'),          name:'MACD',   line:{color:'#29b6f6',width:1.5}, xaxis:'x4', yaxis:'y4'},
+    {type:'scatter', x:T, y:get('macd_signal'),   name:'Signal', line:{color:'#ff7043',width:1.5}, xaxis:'x4', yaxis:'y4'},
+
+    // ─ Row5: RSI
+    {type:'scatter', x:T, y:get('rsi'), name:'RSI', line:{color:'#ce93d8',width:1.5}, xaxis:'x5', yaxis:'y5'},
+
+    // ─ Row6: KDJ
+    {type:'scatter', x:T, y:get('kdj_k'), name:'K', line:{color:'#66bb6a',width:1.2}, xaxis:'x6', yaxis:'y6'},
+    {type:'scatter', x:T, y:get('kdj_d'), name:'D', line:{color:'#ef5350',width:1.2}, xaxis:'x6', yaxis:'y6'},
+    {type:'scatter', x:T, y:get('kdj_j'), name:'J', line:{color:'#ffb300',width:1.2,dash:'dot'}, xaxis:'x6', yaxis:'y6'},
   ];
+
+  // 更新 KDJ shapes（xref 改为 x6）
+  shapes.forEach(s => {
+    if (s.xref === 'x5' && s.yref === 'y5') { s.xref = 'x6'; s.yref = 'y6'; }
+  });
+
+  const el  = document.getElementById('chart');
+  const elH = Math.max(el.clientHeight || 680, 500);
 
   const layout = {
     paper_bgcolor:'#131722', plot_bgcolor:'#131722',
-    font:{color:'#d1d4dc',size:11},
-    margin:{l:55,r:130,t:20,b:30},
+    font:{color:'#d1d4dc', size:11},
+    height: elH,
+    margin:{l:8, r:80, t:8, b:28},
     showlegend:true,
-    legend:{orientation:'h',y:1.04,x:0,font:{size:10},bgcolor:'rgba(0,0,0,0)'},
-    xaxis:  {domain:[0,1],anchor:'y',  showgrid:true,gridcolor:'#1e2130',zeroline:false,rangeslider:{visible:false},showticklabels:false},
-    xaxis2: {domain:[0,1],anchor:'y2', showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
-    xaxis3: {domain:[0,1],anchor:'y3', showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
-    xaxis4: {domain:[0,1],anchor:'y4', showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
-    xaxis5: {domain:[0,1],anchor:'y5', showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x'},
-    yaxis:  {domain:[0.56,1.0], showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right'},
-    yaxis2: {domain:[0.44,0.54],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right'},
-    yaxis2b:{domain:[0.44,0.54],overlaying:'y2',side:'left',showgrid:false,showticklabels:false,zeroline:false},
-    yaxis3: {domain:[0.30,0.42],showgrid:true,gridcolor:'#1e2130',zeroline:true,side:'right'},
-    yaxis4: {domain:[0.17,0.28],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
-    yaxis5: {domain:[0.02,0.15],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
+    legend:{orientation:'h', y:1.025, x:0, font:{size:10}, bgcolor:'rgba(0,0,0,0)', itemwidth:50},
+
+    // X 轴（共享）
+    xaxis:  {domain:[0,1], anchor:'y',  showgrid:true, gridcolor:'#1e2130', zeroline:false, rangeslider:{visible:false}, showticklabels:false},
+    xaxis2: {domain:[0,1], anchor:'y2', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
+    xaxis3: {domain:[0,1], anchor:'y3', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
+    xaxis4: {domain:[0,1], anchor:'y4', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
+    xaxis5: {domain:[0,1], anchor:'y5', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
+    xaxis6: {domain:[0,1], anchor:'y6', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x'},
+
+    // Y 轴（6个子图）
+    // Row1 K线 [50%~100%] —— 固定范围，防止 Fib 线撑大
+    yaxis:  {domain:[0.50,1.00], range:[yMin,yMax], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', tickformat:',.0f'},
+    // Row2 成交量 [40%~49%]
+    yaxis2: {domain:[0.40,0.49], showgrid:false, gridcolor:'#1e2130', zeroline:false, side:'right', showticklabels:false},
+    // Row3 OBV   [30%~39%]
+    yaxis3: {domain:[0.30,0.39], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', showticklabels:true,
+             tickformat:'.3s', title:{text:'OBV', font:{size:9,color:'#546e7a'}}},
+    // Row4 MACD  [20%~29%]
+    yaxis4: {domain:[0.20,0.29], showgrid:true, gridcolor:'#1e2130', zeroline:true,  zerolinecolor:'#2a2e39', side:'right'},
+    // Row5 RSI   [11%~19%]
+    yaxis5: {domain:[0.11,0.19], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', range:[0,100]},
+    // Row6 KDJ   [01%~10%]
+    yaxis6: {domain:[0.01,0.09], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', range:[0,100]},
+
     shapes, annotations:anns,
     hovermode:'x unified',
-    hoverlabel:{bgcolor:'#1e2130',bordercolor:'#2a2e39',font:{size:11}},
+    hoverlabel:{bgcolor:'#1a2035', bordercolor:'#2a2e39', font:{size:11}},
   };
 
   const config = {
-    responsive:true, displayModeBar:true,
+    responsive:true, displayModeBar:true, scrollZoom:true,
     modeBarButtonsToRemove:['lasso2d','select2d'],
     displaylogo:false,
   };
 
-  const el = document.getElementById('chart');
   Plotly.react(el, traces, layout, config);
   chartRendered = true;
 }
@@ -621,6 +715,8 @@ function renderChart(candles, supports, resistances, fib, tf) {
 // 初始化
 // ─────────────────────────────────────────────
 async function init() {
+  initSymbolSelect();
+  
   // 立即获取价格
   fetchPrice();
 
