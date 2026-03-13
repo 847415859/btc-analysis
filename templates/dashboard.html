@@ -2,30 +2,70 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多币种实时技术分析</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>CryptoTA · 多币种技术分析</title>
+
+<!-- PWA -->
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CryptoTA">
+<meta name="theme-color" content="#131722">
+
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <style>
+/* ══════════════════════════════════════
+   CSS 变量 & 重置
+══════════════════════════════════════ */
 :root {
-  --bg:       #0e1117;
-  --bg2:      #131722;
-  --bg3:      #1a2035;
-  --border:   #2a2e39;
-  --border2:  #1e2130;
-  --text:     #d1d4dc;
-  --text2:    #90a4ae;
-  --text3:    #546e7a;
-  --bull:     #26a69a;
-  --bear:     #ef5350;
-  --neutral:  #f9a825;
-  --blue:     #90caf9;
-  --accent:   #29b6f6;
+  --bg:      #0e1117;
+  --bg2:     #131722;
+  --bg3:     #1a2035;
+  --border:  #2a2e39;
+  --border2: #1e2130;
+  --text:    #d1d4dc;
+  --text2:   #90a4ae;
+  --text3:   #546e7a;
+  --bull:    #26a69a;
+  --bear:    #ef5350;
+  --neutral: #f9a825;
+  --blue:    #90caf9;
+  --accent:  #29b6f6;
+  --nav-h:   56px;
+  --safe-b:  env(safe-area-inset-bottom, 0px);
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif; font-size: 13px; overflow-x: hidden; }
+html, body { height: 100%; background: var(--bg); color: var(--text);
+  font-family: 'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif; font-size: 13px; }
 
-/* ── 顶部头 ── */
-.header {
+/* ══════════════════════════════════════
+   共用组件
+══════════════════════════════════════ */
+.bull    { color: var(--bull);    }
+.bear    { color: var(--bear);    }
+.neutral { color: var(--neutral); }
+
+.spinner {
+  width: 36px; height: 36px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .8s linear infinite; margin-bottom: 12px;
+}
+@keyframes spin    { to { transform: rotate(360deg); } }
+@keyframes pulse   { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
+
+.loading {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; color: var(--text2);
+}
+.price-change.up   { background: rgba(38,166,154,.15); color: var(--bull); }
+.price-change.down { background: rgba(239,83,80,.15);  color: var(--bear); }
+
+/* ══════════════════════════════════════
+   ── 桌面端布局（原有逻辑，完整保留）──
+══════════════════════════════════════ */
+.desktop-header {
   background: linear-gradient(90deg, var(--bg2), var(--bg3));
   border-bottom: 1px solid var(--border);
   padding: 10px 20px;
@@ -37,31 +77,24 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
   padding: 4px 8px; border-radius: 4px; font-size: 14px; font-weight: 600;
   outline: none; cursor: pointer;
 }
-.symbol-select:hover { border-color: var(--text3); }
-.price-main { font-size: 28px; font-weight: 700; color: #fff; margin-left: 6px; }
+.price-main   { font-size: 28px; font-weight: 700; color: #fff; margin-left: 6px; }
 .price-change { font-size: 14px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
-.price-change.up   { background: rgba(38,166,154,.15); color: var(--bull); }
-.price-change.down { background: rgba(239,83,80,.15);  color: var(--bear); }
 .header-stats { display: flex; gap: 16px; margin-left: 12px; }
 .header-stat  { display: flex; flex-direction: column; }
 .header-stat .lbl { font-size: 10px; color: var(--text3); }
 .header-stat .val { font-size: 12px; color: var(--text2); font-weight: 600; }
-
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.countdown-box { text-align: center; }
+.countdown-box   { text-align: center; }
 .countdown-label { font-size: 10px; color: var(--text3); }
 .countdown-val   { font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
-.update-time { font-size: 11px; color: var(--text3); }
+.update-time     { font-size: 11px; color: var(--text3); }
 .updating-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--neutral); display: none;
+  width: 8px; height: 8px; border-radius: 50%; background: var(--neutral); display: none;
   animation: pulse 1s infinite;
 }
 .updating-dot.active { display: inline-block; }
-@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
 
-/* ── 多周期汇总条 ── */
-.summary-bar {
+.desktop-summary-bar {
   background: var(--bg2); border-bottom: 1px solid var(--border);
   padding: 8px 20px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
@@ -69,23 +102,20 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
 .tf-chip {
   padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
   border: 1px solid var(--border); cursor: pointer; transition: all .15s;
-  display: flex; align-items: center; gap: 5px;
+  display: inline-flex; align-items: center; gap: 5px;
 }
-.tf-chip:hover { border-color: var(--blue); }
+.tf-chip:hover  { border-color: var(--blue); }
 .tf-chip.active { border-color: var(--blue); background: rgba(144,202,249,.08); }
-.tf-chip .chip-score { font-size: 11px; opacity: .85; }
-.chip-bull { color: var(--bull); }
-.chip-bear { color: var(--bear); }
+.tf-chip .chip-score  { font-size: 11px; opacity: .85; }
+.chip-bull    { color: var(--bull); }
+.chip-bear    { color: var(--bear); }
 .chip-neutral { color: var(--neutral); }
 
-/* ── 主区域 ── */
-.main { display: flex; height: calc(100vh - 120px); overflow: hidden; }
-
-/* ── 左侧指标面板 ── */
+/* 桌面主区域 */
+.desktop-main { display: flex; height: calc(100vh - 120px); overflow: hidden; }
 .sidebar {
   width: 320px; min-width: 280px; flex-shrink: 0;
-  overflow-y: auto; border-right: 1px solid var(--border);
-  background: var(--bg2);
+  overflow-y: auto; border-right: 1px solid var(--border); background: var(--bg2);
 }
 .sidebar::-webkit-scrollbar { width: 4px; }
 .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -96,334 +126,953 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI','PingF
 .card th { font-size: 10px; color: var(--text3); font-weight: 500; padding: 3px 4px; text-align: left; border-bottom: 1px solid var(--border2); }
 .card td { padding: 4px 4px; font-size: 12px; border-bottom: 1px solid rgba(255,255,255,.03); }
 .card tr:last-child td { border-bottom: none; }
-.row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.row       { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 .row-label { color: var(--text3); min-width: 85px; font-size: 12px; }
 .row-val   { font-weight: 600; font-size: 12px; }
 .row-sig   { font-size: 11px; }
-
 .overall-box {
   padding: 10px 12px; border-radius: 6px; margin-bottom: 8px;
   background: rgba(255,255,255,.03); border-left: 4px solid var(--neutral);
 }
 .overall-text { font-size: 15px; font-weight: 700; }
 .score-bar { display: flex; gap: 3px; align-items: center; margin-top: 5px; }
-.score-bar-bull { height: 6px; background: var(--bull); border-radius: 2px; transition: width .5s; }
-.score-bar-bear { height: 6px; background: var(--bear); border-radius: 2px; transition: width .5s; }
+.score-bar-bull  { height: 6px; background: var(--bull); border-radius: 2px; transition: width .5s; }
+.score-bar-bear  { height: 6px; background: var(--bear); border-radius: 2px; transition: width .5s; }
 .score-bar-label { font-size: 10px; color: var(--text3); }
 
-.bull { color: var(--bull); }
-.bear { color: var(--bear); }
-.neutral { color: var(--neutral); }
-
-/* ── 右侧图表 ── */
-.chart-area {
-  flex: 1; overflow: hidden;
-  display: flex; flex-direction: column;
-}
+.chart-area { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .chart-toolbar {
   padding: 6px 14px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 8px; background: var(--bg2);
 }
 .chart-toolbar span { font-size: 11px; color: var(--text3); }
-#chart { flex: 1; width: 100%; }
+#chart-desktop { flex: 1; width: 100%; position: relative; }
 
-/* ── loading ── */
-.loading {
+/* ══════════════════════════════════════
+   ── 手机端专属布局 ──
+   默认隐藏，屏幕 < 768px 时显示
+══════════════════════════════════════ */
+.mobile-only    { display: none; }
+.desktop-only   { display: contents; }
+
+@media (max-width: 767px) {
+  /* 整体结构 */
+  html, body { overflow: hidden; }
+
+  .desktop-only   { display: none !important; }
+  .mobile-only    { display: flex; }
+
+  /* ── 顶部 App Header ── */
+  .app-header {
+    flex-direction: column; gap: 4px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 14px 6px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    flex-shrink: 0;
+  }
+  .app-header-row1 {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+  }
+  .app-symbol-select {
+    background: transparent; border: none; color: var(--accent);
+    font-size: 16px; font-weight: 700; outline: none; cursor: pointer;
+  }
+  .app-price-big   { font-size: 22px; font-weight: 700; color: #fff; margin-left: auto; }
+  .app-price-chg   { font-size: 12px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+  .app-header-row2 { display: flex; align-items: center; gap: 14px; width: 100%; }
+  .app-stat        { display: flex; flex-direction: column; }
+  .app-stat .lbl   { font-size: 9px; color: var(--text3); }
+  .app-stat .val   { font-size: 11px; color: var(--text2); font-weight: 600; }
+  .app-countdown   { margin-left: auto; text-align: right; }
+  .app-countdown .lbl { font-size: 9px; color: var(--text3); }
+  .app-countdown .val { font-size: 14px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .app-updating-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--neutral); display: none;
+    animation: pulse 1s infinite; flex-shrink: 0;
+  }
+  .app-updating-dot.active { display: inline-block; }
+
+  /* ── 周期切换条 ── */
+  .app-tf-bar {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 4px 10px; overflow-x: auto; gap: 6px; flex-shrink: 0;
+    scrollbar-width: none;
+  }
+  .app-tf-bar::-webkit-scrollbar { display: none; }
+  .app-tf-chip {
+    padding: 3px 12px; border-radius: 14px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); cursor: pointer; white-space: nowrap; flex-shrink: 0;
+    transition: all .15s;
+  }
+  .app-tf-chip.active { border-color: var(--accent); background: rgba(41,182,246,.1); color: var(--accent); }
+
+  /* ── 主内容区 ── */
+  .app-main {
+    flex: 1; min-height: 0; overflow: hidden; position: relative;
+    flex-direction: column;
+  }
+  .tab-panel { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+  .tab-panel.active { display: flex; }
+
+  /* 图表面板 */
+  #panel-chart  { background: var(--bg); }
+  #chart-main   { flex: 1; width: 100%; min-height: 0; position: relative; }
+  #chart-sub    { flex: 1; width: 100%; min-height: 0; position: relative; }
+
+  /* 分析面板 */
+  #panel-analysis, #panel-signals { overflow-y: auto; background: var(--bg2); }
+  #panel-analysis::-webkit-scrollbar,
+  #panel-signals::-webkit-scrollbar { width: 3px; }
+
+  /* ── 底部导航 ── */
+  .bottom-nav {
+    background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex !important; /* override .mobile-only */
+    padding-bottom: var(--safe-b);
+    flex-shrink: 0; height: calc(var(--nav-h) + var(--safe-b));
+  }
+  .nav-item {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 3px; border: none; background: none;
+    color: var(--text3); font-size: 10px; font-weight: 600; cursor: pointer;
+    transition: color .15s; padding: 6px 0;
+  }
+  .nav-item svg      { width: 22px; height: 22px; }
+  .nav-item.active   { color: var(--accent); }
+  .nav-item.active svg path,
+  .nav-item.active svg rect,
+  .nav-item.active svg polyline { stroke: var(--accent); }
+
+  /* 信号面板 Grid */
+  .signals-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px;
+  }
+  .sig-card {
+    background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px;
+    padding: 10px 12px; cursor: pointer;
+  }
+  .sig-card-tf   { font-size: 10px; color: var(--text3); font-weight: 600; text-transform: uppercase; }
+  .sig-card-score{ font-size: 20px; font-weight: 700; margin: 4px 0 2px; }
+  .sig-card-text { font-size: 11px; }
+  .sig-bar       { display: flex; gap: 2px; margin-top: 6px; height: 4px; border-radius: 2px; overflow: hidden; }
+  .sig-bar-bull  { background: var(--bull); border-radius: 2px; }
+  .sig-bar-bear  { background: var(--bear); border-radius: 2px; }
+
+  .sr-section    { padding: 12px; }
+  .sr-section h3 { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+  .sr-row        { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border2); font-size: 12px; }
+  .sr-row:last-child { border-bottom: none; }
+}
+
+/* ══════════════════════════════════════
+   图表 Loading 覆盖层（桌面 + 手机共用）
+══════════════════════════════════════ */
+.chart-loading-overlay {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 10; background: var(--bg2);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  height: 100%; color: var(--text2);
+  color: var(--text2);
 }
-.spinner {
-  width: 36px; height: 36px; border: 3px solid var(--border);
-  border-top-color: var(--accent); border-radius: 50%;
-  animation: spin .8s linear infinite; margin-bottom: 12px;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<!-- ── 顶部 ── -->
-<div class="header">
-  <div class="header-logo">
-    <select id="symbolSelect" class="symbol-select"></select>
-  </div>
-  <div id="priceMain" class="price-main">--</div>
-  <div id="priceChange" class="price-change">--</div>
-  <div class="header-stats">
-    <div class="header-stat"><span class="lbl">24H 最高</span><span class="val" id="h24">--</span></div>
-    <div class="header-stat"><span class="lbl">24H 最低</span><span class="val" id="l24">--</span></div>
-    <div class="header-stat"><span class="lbl">24H 成交额</span><span class="val" id="vol24">--</span></div>
-  </div>
-  <div class="header-right">
-    <div><span class="update-time" id="lastUpdateTime">等待初次加载...</span></div>
-    <div class="countdown-box">
-      <div class="countdown-label">下次更新</div>
-      <div class="countdown-val" id="countdown">--:--</div>
+<!-- ══════════════════════════════════════════════════════
+     桌面端布局（原有完整逻辑，手机上被 .desktop-only 隐藏）
+══════════════════════════════════════════════════════ -->
+<div class="desktop-only">
+
+  <!-- 顶部头 -->
+  <div class="desktop-header">
+    <div class="header-logo">
+      <select id="symbolSelect" class="symbol-select"></select>
     </div>
-    <div class="updating-dot" id="updatingDot" title="正在更新数据..."></div>
-  </div>
-</div>
-
-<!-- ── 多周期汇总条 ── -->
-<div class="summary-bar">
-  <span class="summary-label">多周期信号</span>
-  <div id="summaryChips"></div>
-</div>
-
-<!-- ── 主区域 ── -->
-<div class="main">
-  <!-- 左侧指标 -->
-  <div class="sidebar" id="sidebar">
-    <div class="loading" id="sidebarLoading">
-      <div class="spinner"></div>
-      <div>正在加载分析数据...</div>
+    <div id="priceMain" class="price-main">--</div>
+    <div id="priceChange" class="price-change">--</div>
+    <div class="header-stats">
+      <div class="header-stat"><span class="lbl">24H 最高</span><span class="val" id="h24">--</span></div>
+      <div class="header-stat"><span class="lbl">24H 最低</span><span class="val" id="l24">--</span></div>
+      <div class="header-stat"><span class="lbl">24H 成交额</span><span class="val" id="vol24">--</span></div>
+      <div class="header-stat" id="dFundingStatBox" style="display:none">
+        <span class="lbl">资金费率</span>
+        <span class="val" id="dFundingRate">--</span>
+      </div>
+      <div class="header-stat" id="dOIStatBox" style="display:none">
+        <span class="lbl">持仓价值</span>
+        <span class="val" id="dOpenInterestUsdt">--</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div><span class="update-time" id="lastUpdateTime">等待初次加载...</span></div>
+      <div class="countdown-box">
+        <div class="countdown-label">下次更新</div>
+        <div class="countdown-val" id="countdown">--:--</div>
+      </div>
+      <div class="updating-dot" id="updatingDot" title="正在更新数据..."></div>
     </div>
   </div>
 
-  <!-- 右侧图表 -->
-  <div class="chart-area">
-    <div class="chart-toolbar">
-      <span>技术图表 —</span>
-      <span id="chartTfLabel" style="color:#90caf9;font-weight:600">--</span>
-      <span id="chartStatus" style="margin-left:12px;font-size:11px;color:var(--text3)"></span>
-      <span style="margin-left:auto;font-size:10px;color:#37474f">K线 · 均线 · 布林带 · MACD · RSI · KDJ</span>
-    </div>
-    <div id="chart" style="position:relative">
-      <div id="chartLoading" class="loading" style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:10;background:var(--bg2)">
+  <!-- 多周期汇总条 -->
+  <div class="desktop-summary-bar">
+    <span class="summary-label">多周期信号</span>
+    <div id="summaryChips"></div>
+  </div>
+
+  <!-- 主区域 -->
+  <div class="desktop-main">
+    <!-- 左侧指标面板 -->
+    <div class="sidebar" id="sidebar">
+      <div class="loading" id="sidebarLoading">
         <div class="spinner"></div>
-        <div>正在加载图表数据...</div>
+        <div>正在加载分析数据...</div>
+      </div>
+    </div>
+
+    <!-- 右侧图表 -->
+    <div class="chart-area">
+      <div class="chart-toolbar">
+        <span>技术图表 —</span>
+        <span id="chartTfLabel" style="color:#90caf9;font-weight:600">--</span>
+        <span id="chartStatus" style="margin-left:12px;font-size:11px;color:var(--text3)"></span>
+        <span style="margin-left:auto;font-size:10px;color:#37474f">K线 · 均线 · BB · VWAP · ATR止损 · MACD · RSI · KDJ</span>
+      </div>
+      <div id="chart-desktop" style="flex:1;position:relative">
+        <div id="chartLoading" class="chart-loading-overlay">
+          <div class="spinner"></div>
+          <div>正在加载图表数据...</div>
+        </div>
       </div>
     </div>
   </div>
-</div>
+
+</div><!-- /desktop-only -->
+
+
+<!-- ══════════════════════════════════════════════════════
+     手机端布局（PWA App 风格）
+══════════════════════════════════════ -->
+<div class="mobile-only" id="mobileApp" style="flex-direction:column;height:100%;overflow:hidden;">
+
+  <!-- App 顶部 Header -->
+  <div class="app-header mobile-only">
+    <div class="app-header-row1">
+      <select id="mSymbolSelect" class="app-symbol-select"></select>
+      <div id="mPriceMain" class="app-price-big">--</div>
+      <div id="mPriceChange" class="app-price-chg price-change">--</div>
+    </div>
+    <div class="app-header-row2">
+      <div class="app-stat"><span class="lbl">24H高</span><span class="val" id="mH24">--</span></div>
+      <div class="app-stat"><span class="lbl">24H低</span><span class="val" id="mL24">--</span></div>
+      <div class="app-stat"><span class="lbl">成交额</span><span class="val" id="mVol24">--</span></div>
+      <div class="app-stat" id="mFundingStatBox" style="display:none">
+        <span class="lbl">资金费率</span>
+        <span class="val" id="mFundingRate">--</span>
+      </div>
+      <div class="app-updating-dot" id="mUpdatingDot"></div>
+      <div class="app-countdown">
+        <div class="lbl">下次更新</div>
+        <div class="val" id="mCountdown">--:--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 周期切换条 -->
+  <div class="app-tf-bar mobile-only" id="mTfBar"></div>
+
+  <!-- 主内容区（4个 Tab 面板） -->
+  <div class="app-main mobile-only" id="appMain">
+
+    <!-- Tab1: K线图 -->
+    <div class="tab-panel active" id="panel-chart">
+      <div id="chart-main" style="flex:1;position:relative">
+        <div class="chart-loading-overlay" id="mChartLoading">
+          <div class="spinner"></div>
+          <div>正在加载图表...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab2: 副图（MACD / RSI / KDJ） -->
+    <div class="tab-panel" id="panel-sub">
+      <div id="chart-sub" style="flex:1;position:relative">
+        <div class="chart-loading-overlay" id="mSubLoading">
+          <div class="spinner"></div>
+          <div>正在加载副图...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab3: 分析（指标卡片） -->
+    <div class="tab-panel" id="panel-analysis">
+      <div class="loading" id="mAnalysisLoading" style="height:100%">
+        <div class="spinner"></div>
+        <div>正在加载分析数据...</div>
+      </div>
+    </div>
+
+    <!-- Tab4: 信号（多周期汇总） -->
+    <div class="tab-panel" id="panel-signals">
+      <div class="loading" id="mSignalsLoading" style="height:100%">
+        <div class="spinner"></div>
+        <div>正在加载信号数据...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 底部导航 -->
+  <nav class="bottom-nav mobile-only">
+    <button class="nav-item active" data-tab="chart" onclick="switchMobileTab('chart',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <span>图表</span>
+    </button>
+    <button class="nav-item" data-tab="sub" onclick="switchMobileTab('sub',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      <span>副图</span>
+    </button>
+    <button class="nav-item" data-tab="analysis" onclick="switchMobileTab('analysis',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/>
+      </svg>
+      <span>分析</span>
+    </button>
+    <button class="nav-item" data-tab="signals" onclick="switchMobileTab('signals',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+      </svg>
+      <span>信号</span>
+    </button>
+  </nav>
+
+</div><!-- /mobileApp -->
 
 <script>
-// ─────────────────────────────────────────────
-// 配置
-// ─────────────────────────────────────────────
-const SYMBOLS   = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+/* ══════════════════════════════════════════════════════
+   全局配置
+══════════════════════════════════════════════════════ */
+const SYMBOLS   = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT'];
 const TF_LIST   = ['15m','30m','1h','2h','4h','8h','1d','1w'];
-const TF_LABELS = {'15m':'15分钟','30m':'30分钟','1h':'1小时','2h':'2小时','4h':'4小时','8h':'8小时','1d':'日线','1w':'周线'};
+const TF_LABELS = {'15m':'15分','30m':'30分','1h':'1H','2h':'2H','4h':'4H','8h':'8H','1d':'日','1w':'周'};
+const TF_LABELS_FULL = {'15m':'15分钟','30m':'30分钟','1h':'1小时','2h':'2小时','4h':'4小时','8h':'8小时','1d':'日线','1w':'周线'};
 
 let currentTf     = '1d';
 let currentSymbol = 'BTCUSDT';
-let analysisData  = {};       // 最新分析结果
-let chartRendered = false;
+let analysisData  = {};
+let isMobile      = window.innerWidth < 768;
+let mobileTab     = 'chart';   // 当前手机 tab
+let fundingCache  = {};        // { symbol: fundingApiResponse }
 
-// ─────────────────────────────────────────────
-// 工具函数
-// ─────────────────────────────────────────────
-const fmt  = n  => n == null ? '--' : '$' + Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const fmtN = n  => n == null ? '--' : Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const sc   = s  => s > 0 ? 'bull' : (s < 0 ? 'bear' : 'neutral');
+/* ══════════════════════════════════════════════════════
+   工具函数
+══════════════════════════════════════════════════════ */
+const fmt   = n => n == null ? '--' : '$' + Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtN  = n => n == null ? '--' : Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const sc    = s => s > 0 ? 'bull' : (s < 0 ? 'bear' : 'neutral');
 const noNaN = arr => arr.map(v => (v == null || isNaN(v)) ? null : v);
 
-// ─────────────────────────────────────────────
-// 初始化下拉框
-// ─────────────────────────────────────────────
-function initSymbolSelect() {
-  const sel = document.getElementById('symbolSelect');
-  SYMBOLS.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s;
-    opt.textContent = s;
-    sel.appendChild(opt);
+function setEls(ids, val) { ids.forEach(([id, v]) => { const el = document.getElementById(id); if(el) el.textContent = v || val; }); }
+
+/* ══════════════════════════════════════════════════════
+   PWA：注册 Service Worker
+══════════════════════════════════════════════════════ */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js').catch(console.warn);
+}
+
+/* ══════════════════════════════════════════════════════
+   初始化下拉框（桌面 + 手机双份）
+══════════════════════════════════════════════════════ */
+function initSymbolSelects() {
+  ['symbolSelect','mSymbolSelect'].forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    SYMBOLS.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s; sel.appendChild(opt);
+    });
+    sel.value = currentSymbol;
+    sel.onchange = e => {
+      currentSymbol = e.target.value;
+      // 同步另一个下拉框
+      ['symbolSelect','mSymbolSelect'].forEach(oid => {
+        const o = document.getElementById(oid);
+        if (o && o !== sel) o.value = currentSymbol;
+      });
+      resetData(); fetchPrice(); fetchFunding(); fetchAnalysisAndUpdate();
+    };
   });
-  sel.value = currentSymbol;
-  sel.onchange = (e) => {
-    currentSymbol = e.target.value;
-    resetData();
-    fetchPrice();
-    fetchAnalysisAndUpdate();
-  };
 }
 
 function resetData() {
   analysisData = {};
-  document.getElementById('priceMain').textContent = '--';
-  document.getElementById('priceChange').textContent = '--';
-  document.getElementById('h24').textContent = '--';
-  document.getElementById('l24').textContent = '--';
-  document.getElementById('vol24').textContent = '--';
-  document.getElementById('lastUpdateTime').textContent = '切换中...';
+  setEls([
+    ['priceMain','--'],['mPriceMain','--'],
+    ['h24','--'],['mH24','--'],
+    ['l24','--'],['mL24','--'],
+    ['vol24','--'],['mVol24','--'],
+    ['lastUpdateTime','切换中...'],
+  ], '--');
+  // 隐藏资金费率（切换币种后重新获取）
+  ['dFundingStatBox','dOIStatBox','mFundingStatBox'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.display = 'none';
+  });
+  const pc = document.getElementById('priceChange');
+  const mpc = document.getElementById('mPriceChange');
+  if (pc) pc.textContent = '--';
+  if (mpc) mpc.textContent = '--';
   document.getElementById('summaryChips').innerHTML = '';
-  document.getElementById('sidebar').innerHTML = `
-    <div class="loading" id="sidebarLoading">
-      <div class="spinner"></div>
-      <div>正在加载分析数据...</div>
-    </div>`;
-  // 重置图表
-  const chartLoading = document.getElementById('chartLoading');
-  if (chartLoading) chartLoading.style.display = 'flex';
+  document.getElementById('sidebar').innerHTML = `<div class="loading" id="sidebarLoading"><div class="spinner"></div><div>正在加载分析数据...</div></div>`;
+  showChartLoading(true);
 }
 
-// ─────────────────────────────────────────────
-// 实时价格（每10秒）
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   手机端周期栏
+══════════════════════════════════════════════════════ */
+function buildMobileTfBar() {
+  const bar = document.getElementById('mTfBar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  TF_LIST.forEach(tf => {
+    const ch = document.createElement('div');
+    ch.className = 'app-tf-chip' + (tf === currentTf ? ' active' : '');
+    ch.textContent = TF_LABELS[tf];
+    ch.onclick = () => switchTf(tf);
+    bar.appendChild(ch);
+  });
+}
+
+/* ══════════════════════════════════════════════════════
+   手机端 Tab 切换
+══════════════════════════════════════════════════════ */
+function switchMobileTab(tab, btn) {
+  mobileTab = tab;
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  const panel = document.getElementById('panel-' + tab);
+  if (panel) panel.classList.add('active');
+  if (btn) btn.classList.add('active');
+
+  // 切到副图时渲染（如果数据已就绪）
+  if (tab === 'sub' && analysisData._ready) {
+    const tfData = analysisData[currentTf];
+    if (tfData) fetchSubChart(currentTf);
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   实时价格（每10秒）
+══════════════════════════════════════════════════════ */
 async function fetchPrice() {
   try {
     const r = await fetch(`/api/price?symbol=${currentSymbol}`);
     if (!r.ok) return;
     const d = await r.json();
-    if (d.symbol !== currentSymbol) return; // 防止快速切换导致的数据错乱
-
-    document.getElementById('priceMain').textContent = fmt(d.price);
+    if (d.symbol !== currentSymbol) return;
+    const p = fmt(d.price);
     const chg = d.change_pct;
-    const el  = document.getElementById('priceChange');
-    el.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
-    el.className   = 'price-change ' + (chg >= 0 ? 'up' : 'down');
-    document.getElementById('h24').textContent  = fmt(d.high24h);
-    document.getElementById('l24').textContent  = fmt(d.low24h);
+    const chgTxt = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+    const chgCls = 'price-change ' + (chg >= 0 ? 'up' : 'down');
     const vol = d.volume24h;
-    document.getElementById('vol24').textContent =
-      vol >= 1e9 ? (vol/1e9).toFixed(2)+'B' : (vol/1e6).toFixed(0)+'M';
+    const volTxt = vol >= 1e9 ? (vol/1e9).toFixed(2)+'B' : (vol/1e6).toFixed(0)+'M';
+
+    // 桌面
+    setEls([['priceMain',p],['h24',fmt(d.high24h)],['l24',fmt(d.low24h)],['vol24',volTxt]], '--');
+    const pc = document.getElementById('priceChange');
+    if (pc) { pc.textContent = chgTxt; pc.className = chgCls; }
+
+    // 手机
+    setEls([['mPriceMain',p],['mH24',fmt(d.high24h)],['mL24',fmt(d.low24h)],['mVol24',volTxt]], '--');
+    const mpc = document.getElementById('mPriceChange');
+    if (mpc) { mpc.textContent = chgTxt; mpc.className = 'app-price-chg ' + (chg >= 0 ? 'up' : 'down'); }
   } catch(e) { console.warn('price fetch failed', e); }
 }
 
-// ─────────────────────────────────────────────
-// 倒计时
-// ─────────────────────────────────────────────
-let _remaining = 300;
-let _countdownTimer = null;
+/* ══════════════════════════════════════════════════════
+   资金费率 + 持仓量（每30秒刷新）
+══════════════════════════════════════════════════════ */
+async function fetchFunding() {
+  try {
+    const r = await fetch(`/api/funding?symbol=${currentSymbol}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.error) return;
 
+    // 存入全局缓存（供 buildAnalysisHTML 使用）
+    fundingCache[currentSymbol] = d;
+
+    // 资金费率颜色：正=橙(多头偏多)，负=绿(空头偏多)，中性=灰
+    const fr = d.funding_rate;
+    const fa = d.analysis;
+    const frTxt   = fr != null ? (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%' : '--';
+    const frColor = fa ? fa.color : (fr == null ? '' : fr > 0 ? 'var(--bull)' : fr < 0 ? 'var(--bear)' : 'var(--text)');
+
+    // 持仓价值格式化
+    const oi = d.open_interest_usdt;
+    let oiTxt = '--';
+    if (oi != null) {
+      oiTxt = oi >= 1e9 ? (oi/1e9).toFixed(2)+'B' : oi >= 1e6 ? (oi/1e6).toFixed(0)+'M' : oi.toFixed(0);
+    }
+
+    // 更新桌面 header
+    const dfb = document.getElementById('dFundingStatBox');
+    const dob = document.getElementById('dOIStatBox');
+    const dfr = document.getElementById('dFundingRate');
+    const doi = document.getElementById('dOpenInterestUsdt');
+    if (dfb && fr != null) { dfb.style.display=''; dfr.textContent=frTxt; dfr.style.color=frColor; }
+    if (dob && oi != null) { dob.style.display=''; doi.textContent=oiTxt; }
+
+    // 更新手机 header
+    const mfb = document.getElementById('mFundingStatBox');
+    const mfr = document.getElementById('mFundingRate');
+    if (mfb && fr != null) { mfb.style.display=''; mfr.textContent=frTxt; mfr.style.color=frColor; }
+
+    // 触发分析面板重绘（将 funding 数据注入综合研判 + 资金费率卡片）
+    if (analysisData[currentTf]) {
+      updateSidebar(currentTf);
+      if (isMobile) updateMobileAnalysis(currentTf);
+    }
+
+  } catch(e) { console.warn('funding fetch failed', e); }
+}
+
+/* ══════════════════════════════════════════════════════
+   倒计时
+══════════════════════════════════════════════════════ */
+let _remaining = 300, _countdownTimer = null;
 function startCountdown(secs) {
   _remaining = secs;
   if (_countdownTimer) clearInterval(_countdownTimer);
   _countdownTimer = setInterval(() => {
     _remaining = Math.max(0, _remaining - 1);
-    const m = String(Math.floor(_remaining / 60)).padStart(2, '0');
-    const s = String(_remaining % 60).padStart(2, '0');
-    document.getElementById('countdown').textContent = m + ':' + s;
+    const m = String(Math.floor(_remaining / 60)).padStart(2,'0');
+    const s = String(_remaining % 60).padStart(2,'0');
+    const txt = m + ':' + s;
+    setEls([['countdown',txt],['mCountdown',txt]], '--');
   }, 1000);
 }
 
-// ─────────────────────────────────────────────
-// 轮询状态（每5秒检查是否有新数据）
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   轮询状态
+══════════════════════════════════════════════════════ */
 let _lastUpdate = null;
-
 async function pollStatus() {
   try {
     const r = await fetch(`/api/status?symbol=${currentSymbol}`);
     const d = await r.json();
     if (d.symbol !== currentSymbol) return;
-
-    document.getElementById('updatingDot').classList.toggle('active', d.updating);
+    document.getElementById('updatingDot')?.classList.toggle('active', d.updating);
+    document.getElementById('mUpdatingDot')?.classList.toggle('active', d.updating);
     startCountdown(d.seconds_remaining);
-    
-    // 如果后端数据更新了，或者前端还没准备好
     if ((d.last_update && d.last_update !== _lastUpdate) || (d.ready && !analysisData._ready)) {
       _lastUpdate = d.last_update;
-      if(d.last_update) document.getElementById('lastUpdateTime').textContent = '更新于 ' + d.last_update;
+      if (d.last_update) {
+        const el = document.getElementById('lastUpdateTime');
+        if (el) el.textContent = '更新于 ' + d.last_update;
+      }
       await fetchAnalysisAndUpdate();
     }
   } catch(e) { console.warn('status poll failed', e); }
 }
 
-// ─────────────────────────────────────────────
-// 获取分析数据 + 刷新 UI
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   获取分析数据
+══════════════════════════════════════════════════════ */
 async function fetchAnalysisAndUpdate() {
   try {
     const r = await fetch(`/api/analysis?symbol=${currentSymbol}`);
     const d = await r.json();
     if (d.symbol !== currentSymbol) return;
     if (!d.ready) return;
-
     analysisData = d.timeframes;
     analysisData._ready = true;
     updateSummaryChips();
     updateSidebar(currentTf);
+    updateMobileAnalysis(currentTf);
+    updateMobileSignals();
     await fetchKlinesAndRender(currentTf);
   } catch(e) { console.warn('analysis fetch failed', e); }
 }
 
-// ─────────────────────────────────────────────
-// 多周期汇总 Chips
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   多周期汇总 Chips（桌面顶部条）
+══════════════════════════════════════════════════════ */
 function updateSummaryChips() {
   const container = document.getElementById('summaryChips');
   container.innerHTML = '';
   TF_LIST.forEach(tf => {
-    const data = analysisData[tf];
-    if (!data) return;
-    const rd    = data.rd;
-    const score = rd.score;
+    const data = analysisData[tf]; if (!data) return;
+    const score = data.rd.score;
     const cls   = sc(score);
-    const active = tf === currentTf ? ' active' : '';
-    const chip = document.createElement('div');
-    chip.className = 'tf-chip' + active;
+    const chip  = document.createElement('div');
+    chip.className = 'tf-chip' + (tf === currentTf ? ' active' : '');
     chip.dataset.tf = tf;
-    chip.innerHTML = `<span>${TF_LABELS[tf]}</span><span class="chip-score ${cls}">${score >= 0 ? '+' : ''}${score}</span>`;
+    chip.innerHTML = `<span>${TF_LABELS_FULL[tf]||tf}</span><span class="chip-score chip-${cls}">${score >= 0?'+':''}${score}</span>`;
     chip.onclick = () => switchTf(tf);
     container.appendChild(chip);
   });
 }
 
-// ─────────────────────────────────────────────
-// 切换周期
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   切换周期
+══════════════════════════════════════════════════════ */
 async function switchTf(tf) {
   currentTf = tf;
-  document.querySelectorAll('.tf-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.tf === tf);
-  });
-  document.getElementById('chartTfLabel').textContent = TF_LABELS[tf] || tf;
+  // 更新桌面 chips
+  document.querySelectorAll('.tf-chip').forEach(c => c.classList.toggle('active', c.dataset.tf === tf));
+  // 更新手机 tf-chips
+  document.querySelectorAll('.app-tf-chip').forEach((c,i) => c.classList.toggle('active', TF_LIST[i] === tf));
+  // 更新桌面 chart label
+  const ctl = document.getElementById('chartTfLabel');
+  if (ctl) ctl.textContent = TF_LABELS_FULL[tf] || tf;
   updateSidebar(tf);
+  updateMobileAnalysis(tf);
   await fetchKlinesAndRender(tf);
+  // 如果手机副图正在显示则也刷新
+  if (isMobile && mobileTab === 'sub') fetchSubChart(tf);
 }
 
-// ─────────────────────────────────────────────
-// 左侧指标卡片
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   桌面侧边栏（原有逻辑完整保留）
+══════════════════════════════════════════════════════ */
 function updateSidebar(tf) {
-  const data = analysisData[tf];
-  if (!data) return;
+  const data = analysisData[tf]; if (!data) return;
   const { rd, supports, resistances, fib } = data;
   const sidebar = document.getElementById('sidebar');
+  sidebar.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol]);
+}
 
-  // 颜色辅助
+/* ══════════════════════════════════════════════════════
+   手机端分析面板（与桌面侧边栏相同内容）
+══════════════════════════════════════════════════════ */
+function updateMobileAnalysis(tf) {
+  const data = analysisData[tf]; if (!data) return;
+  const { rd, supports, resistances, fib } = data;
+  const panel = document.getElementById('panel-analysis');
+  if (!panel) return;
+  panel.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol]);
+}
+
+/* ══════════════════════════════════════════════════════
+   资深交易员综合研判卡片
+══════════════════════════════════════════════════════ */
+function buildComprehensiveOpinion(rd, funding) {
+  const techScore = rd.score;
+  const masAbove  = (rd.ma||[]).filter(m => m.above).length;
+  const masTotal  = (rd.ma||[]).length;
+
+  const bullFactors = [], bearFactors = [], warnings = [];
+
+  // ── 均线
+  if      (masAbove >= 4) bullFactors.push(`均线多头排列（${masAbove}/${masTotal} 条在价格下方），趋势强劲`);
+  else if (masAbove <= 1) bearFactors.push(`均线空头排列（${masTotal-masAbove}/${masTotal} 条在价格上方），下行趋势明确`);
+  else if (masAbove >= 3) bullFactors.push(`均线偏多（${masAbove}/${masTotal} 条看多）`);
+  else                    bearFactors.push(`均线偏空（${masTotal-masAbove}/${masTotal} 条看空）`);
+
+  // ── RSI
+  const rsi = rd.rsi?.val ?? 50;
+  if      (rsi >= 70) warnings.push(`RSI ${rsi.toFixed(1)} 超买，短期存在回调压力`);
+  else if (rsi <= 30) warnings.push(`RSI ${rsi.toFixed(1)} 超卖，可能出现技术性反弹`);
+  else if (rsi >= 55) bullFactors.push(`RSI ${rsi.toFixed(1)} 处于强势区域`);
+  else if (rsi <= 45) bearFactors.push(`RSI ${rsi.toFixed(1)} 处于弱势区域`);
+
+  // ── MACD
+  const macdScore = rd.macd?.score ?? 0;
+  if      (macdScore >= 2)  bullFactors.push('MACD 金叉（刚形成），动能切换为上行');
+  else if (macdScore <= -2) bearFactors.push('MACD 死叉（刚形成），动能切换为下行');
+  else if (macdScore > 0)   bullFactors.push('MACD 多头趋势延续');
+  else if (macdScore < 0)   bearFactors.push('MACD 空头趋势延续');
+
+  // ── KDJ
+  const kdjScore = rd.kdj?.score ?? 0;
+  if      (kdjScore >= 2)       bullFactors.push('KDJ 金叉，短期买入信号');
+  else if (kdjScore <= -2)      bearFactors.push('KDJ 死叉，短期卖出信号');
+  else if ((rd.kdj?.k ?? 50) >= 80) warnings.push(`KDJ K值=${(rd.kdj.k).toFixed(1)} 超买区，警惕短线回调`);
+  else if ((rd.kdj?.k ?? 50) <= 20) warnings.push(`KDJ K值=${(rd.kdj.k).toFixed(1)} 超卖区，关注反弹机会`);
+
+  // ── OBV
+  if (rd.obv?.up) bullFactors.push('OBV 上升，资金持续流入，上涨获量能支撑');
+  else            bearFactors.push('OBV 下降，资金流出，需警惕无量上涨');
+
+  // ── VWAP
+  if (rd.vwap) {
+    if (rd.vwap.above) bullFactors.push(`价格在 VWAP 上方 (+${rd.vwap.diff_pct.toFixed(2)}%)，机构成本线多方占优`);
+    else               bearFactors.push(`价格在 VWAP 下方 (${rd.vwap.diff_pct.toFixed(2)}%)，低于机构均成本`);
+  }
+
+  // ── 资金费率情绪层（逆向指标）
+  let frSignalHtml = '', frScore = 0, frConflict = false;
+  if (funding && funding.analysis) {
+    const fa = funding.analysis;
+    const fr = funding.funding_rate;
+    frScore = fa.score;
+    if (fa.score <= -1) {
+      if (techScore >= 3) frConflict = true;
+      warnings.push(`资金费率 ${fr >= 0 ? '+' : ''}${fr}%（${fa.signal}）—— ${fa.interp}`);
+    } else if (fa.score >= 1) {
+      if (techScore <= -3) frConflict = true;
+      bullFactors.push(`资金费率极低 ${fr}%（${fa.signal}）—— ${fa.interp}`);
+    } else {
+      frSignalHtml = `<div style="color:var(--text3);font-size:11px;margin-top:4px">资金费率 ${fr != null ? (fr >= 0 ? '+' : '') + fr + '%' : '--'} · 中性，不额外干扰趋势</div>`;
+    }
+    if (fa.percentile >= 90)
+      warnings.push(`当前费率处于近${fa.days||166}天历史 ${fa.percentile}% 分位（极高区间），多头拥挤度极高`);
+    else if (fa.percentile <= 10)
+      warnings.push(`当前费率处于近${fa.days||166}天历史 ${fa.percentile}% 分位（极低区间），空头拥挤度极高`);
+  }
+
+  // ── 综合判断
+  const compositeScore = techScore + frScore;
+  let levelColor, levelText, suggest;
+  if      (compositeScore >= 8)  { levelColor='#26a69a'; levelText='强烈看多 🚀'; }
+  else if (compositeScore >= 4)  { levelColor='#4caf50'; levelText='偏多 📈'; }
+  else if (compositeScore >= 1)  { levelColor='#8bc34a'; levelText='温和偏多 🟢'; }
+  else if (compositeScore <= -8) { levelColor='#ef5350'; levelText='强烈看空 🔻'; }
+  else if (compositeScore <= -4) { levelColor='#f44336'; levelText='偏空 📉'; }
+  else if (compositeScore <= -1) { levelColor='#ff7043'; levelText='温和偏空 🔴'; }
+  else                           { levelColor='#f9a825'; levelText='中性震荡 ↔️'; }
+
+  const hasFrWarn = (funding?.analysis?.score ?? 0) <= -1;
+  const hasFrOpp  = (funding?.analysis?.score ?? 0) >= 1;
+  if      (compositeScore >= 8 && !hasFrWarn)  suggest = '可积极做多，止损设于ATR止损位下方，目标看前高或斐波那契扩展位';
+  else if (compositeScore >= 8 && hasFrWarn)   suggest = '技术面强势，但费率过热需谨慎；建议轻仓、严格止损，或等费率回落后再加仓';
+  else if (compositeScore >= 4)                suggest = '偏多操作，在支撑位附近逢低买入，注意仓位管理';
+  else if (compositeScore >= 1)                suggest = '小仓位试多，等待突破确认后加仓，不宜重仓';
+  else if (compositeScore <= -8 && !hasFrOpp)  suggest = '可积极做空，止损设于ATR止损位上方，目标看前低或支撑位';
+  else if (compositeScore <= -8 && hasFrOpp)   suggest = '技术面偏空，但费率极度负值有反弹风险；建议空单控制仓位，逢弱才加仓';
+  else if (compositeScore <= -4)               suggest = '偏空操作，反弹至阻力位附近可轻仓做空';
+  else if (compositeScore <= -1)               suggest = '观望为主，避免追多；若有多仓考虑止盈减仓';
+  else                                         suggest = '观望为主，等待方向选择，关注关键支撑阻力位的突破方向';
+
+  // 冲突提示
+  const conflictHtml = frConflict ? `
+    <div style="background:rgba(255,152,0,0.12);border:1px solid rgba(255,152,0,0.3);border-radius:6px;padding:8px 10px;margin-top:8px;font-size:11px;color:#ff9800">
+      ⚠️ <b>多空信号分歧</b>：技术指标偏${techScore > 0 ? '多' : '空'}，但资金费率发出${techScore > 0 ? '过热警告' : '逆向看多'}信号。信号分歧时应降低仓位，等待确认。
+    </div>` : '';
+
+  // 置信度
+  const bullCnt = bullFactors.length, bearCnt = bearFactors.length;
+  const dom = Math.max(bullCnt, bearCnt) / (bullCnt + bearCnt + 0.01);
+  const conf = dom >= 0.75 ? '高' : (dom >= 0.55 ? '中' : '低');
+  const confColor = conf === '高' ? '#26a69a' : (conf === '中' ? '#f9a825' : '#78909c');
+
+  const bullList = bullFactors.length
+    ? bullFactors.map(f => `<li style="color:#4caf50;margin-bottom:3px">✓ ${f}</li>`).join('')
+    : '<li style="color:var(--text3)">暂无明显看多因素</li>';
+  const bearList = bearFactors.length
+    ? bearFactors.map(f => `<li style="color:#ef5350;margin-bottom:3px">✗ ${f}</li>`).join('')
+    : '<li style="color:var(--text3)">暂无明显看空因素</li>';
+  const warnHtml = warnings.length ? `
+    <div style="margin-top:8px;padding:8px 10px;background:rgba(255,193,7,0.1);border-left:3px solid #ffc107;border-radius:0 4px 4px 0">
+      <div style="font-size:11px;color:#ffc107;font-weight:600;margin-bottom:4px">⚠ 风险提示</div>
+      ${warnings.map(w => `<div style="font-size:11px;color:#ffca28;margin-bottom:2px">• ${w}</div>`).join('')}
+    </div>` : '';
+
+  return `
+  <div class="card" style="border-left:3px solid ${levelColor}">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🎯 资深交易员综合研判</span>
+      <span style="font-size:10px;color:${confColor};font-weight:600">置信度: ${conf}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border2)">
+      <div style="font-size:20px;font-weight:700;color:${levelColor}">${levelText}</div>
+      <div style="flex:1">
+        <div style="font-size:11px;color:var(--text3)">综合评分（技术${techScore >= 0 ? '+' : ''}${techScore} + 情绪${frScore >= 0 ? '+' : ''}${frScore}）</div>
+        <div style="font-size:13px;font-weight:600;color:${levelColor}">${compositeScore >= 0 ? '+' : ''}${compositeScore}</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;font-size:12px;line-height:1.5">
+      <div style="font-weight:600;color:var(--text1);margin-bottom:4px">建议操作</div>
+      <div style="color:${levelColor}">${suggest}</div>
+    </div>
+    ${conflictHtml}
+    ${warnHtml}
+    <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <div style="font-size:11px;color:#4caf50;font-weight:600;margin-bottom:4px">📈 看多因素</div>
+        <ul style="list-style:none;padding:0;margin:0;font-size:11px;line-height:1.6">${bullList}</ul>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#ef5350;font-weight:600;margin-bottom:4px">📉 看空因素</div>
+        <ul style="list-style:none;padding:0;margin:0;font-size:11px;line-height:1.6">${bearList}</ul>
+      </div>
+    </div>
+    ${frSignalHtml}
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   资金费率详情卡片（含迷你折线图 + 百分位）
+══════════════════════════════════════════════════════ */
+function buildFundingCard(funding) {
+  if (!funding || funding.funding_rate == null) return '';
+  const fr   = funding.funding_rate;
+  const fa   = funding.analysis || {};
+  const hist = funding.historical || [];
+  const col  = fa.color || '#9e9e9e';
+
+  // ── 资金费率走势图（自适应天数，含均值线 + 时间轴）
+  let miniChart = '';
+  if (hist.length >= 2) {
+    const W = 260, H = 80, P = 4, AXIS = 14;  // AXIS = 底部时间轴预留高度
+    const rates  = hist.map(h => h.rate);
+    const times  = hist.map(h => h.time);
+    const rMin   = Math.min(...rates), rMax = Math.max(...rates);
+    const rRange = rMax - rMin || 0.001;
+    const avg    = rates.reduce((a, b) => a + b, 0) / rates.length;
+    const chartH = H - P - AXIS;  // 折线区域高度
+
+    const toY = v => H - AXIS - P - ((v - rMin) / rRange) * (chartH - P);
+    const pts = rates.map((r, i) => {
+      const x = P + (i / (rates.length - 1)) * (W - P * 2);
+      return `${x.toFixed(1)},${toY(r).toFixed(1)}`;
+    }).join(' ');
+    const lastPt  = pts.split(' ').at(-1).split(',');
+    const lineCol = fr >= 0.05 ? '#ef5350' : (fr <= -0.05 ? '#26a69a' : '#f9a825');
+
+    // 零线（仅当数据跨越正负时）
+    const zeroLine = (rMin <= 0 && rMax >= 0)
+      ? `<line x1="${P}" y1="${toY(0).toFixed(1)}" x2="${W-P}" y2="${toY(0).toFixed(1)}" stroke="#555" stroke-width="0.6" stroke-dasharray="3,2"/>`
+      : '';
+    // 均值参考线（橙色虚线）
+    const avgLine = `<line x1="${P}" y1="${toY(avg).toFixed(1)}" x2="${W-P}" y2="${toY(avg).toFixed(1)}" stroke="#f9a825" stroke-width="0.8" stroke-dasharray="4,3" opacity="0.7"/>`;
+
+    // 时间轴：均分4个刻度
+    const tickIdxs = [0, Math.floor(hist.length/3), Math.floor(hist.length*2/3), hist.length-1];
+    const ticksHtml = tickIdxs.map(i => {
+      const x = P + (i / (hist.length - 1)) * (W - P * 2);
+      const lbl = new Date(times[i]).toLocaleDateString('zh-CN', {month:'numeric', day:'numeric'});
+      return `<text x="${x.toFixed(1)}" y="${H - 2}" font-size="8" fill="#555" text-anchor="middle">${lbl}</text>`;
+    }).join('');
+
+    const actualDays = Math.round(hist.length * 8 / 24);
+    miniChart = `
+      <div style="margin:8px 0 4px">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-bottom:3px">
+          <span>近 ${actualDays} 天资金费率走势（${hist.length} 期）</span>
+          <span style="color:#f9a825">均值 ${avg >= 0 ? '+' : ''}${avg.toFixed(4)}%</span>
+        </div>
+        <svg width="${W}" height="${H}" style="display:block;max-width:100%;border-radius:3px">
+          <rect width="${W}" height="${H}" fill="rgba(255,255,255,0.03)" rx="3"/>
+          ${zeroLine}
+          ${avgLine}
+          ${ticksHtml}
+          <polyline points="${pts}" fill="none" stroke="${lineCol}" stroke-width="1.5" stroke-linejoin="round"/>
+          <circle cx="${lastPt[0]}" cy="${lastPt[1]}" r="3" fill="${lineCol}"/>
+        </svg>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-top:2px">
+          <span>最低 ${rMin.toFixed(4)}%</span>
+          <span style="color:#f9a825">均值 ${avg >= 0 ? '+' : ''}${avg.toFixed(4)}%</span>
+          <span>最高 ${rMax.toFixed(4)}%</span>
+        </div>
+      </div>`;
+  }
+
+  // ── 百分位进度条
+  const pct      = fa.percentile ?? 50;
+  const pctColor = pct >= 80 ? '#ef5350' : (pct <= 20 ? '#26a69a' : '#f9a825');
+  const pctBar   = `
+    <div style="margin:6px 0 8px">
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-bottom:2px">
+        <span>历史百分位</span><span style="color:${pctColor};font-weight:600">${pct}%</span>
+      </div>
+      <div style="height:5px;background:var(--border2);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${pctColor};border-radius:3px;transition:width .3s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text3);margin-top:2px">
+        <span>极度偏空</span><span>中性</span><span>极度偏多</span>
+      </div>
+    </div>`;
+
+  // ── 持仓量
+  const oiCoins = funding.open_interest != null
+    ? (funding.open_interest >= 1e6
+        ? (funding.open_interest/1e6).toFixed(2)+'M'
+        : funding.open_interest >= 1e3
+          ? (funding.open_interest/1e3).toFixed(1)+'K'
+          : funding.open_interest.toFixed(0))
+    : '--';
+  const oiUsdt = funding.open_interest_usdt != null
+    ? (funding.open_interest_usdt >= 1e9
+        ? (funding.open_interest_usdt/1e9).toFixed(2)+'B'
+        : (funding.open_interest_usdt/1e6).toFixed(1)+'M') + ' USDT'
+    : '--';
+
+  // ── 下次结算
+  let nextStr = '--';
+  if (funding.next_funding_time) {
+    const d = new Date(funding.next_funding_time);
+    nextStr = d.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  return `
+  <div class="card">
+    <div class="card-title">💰 资金费率 · 市场情绪</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border2)">
+      <div>
+        <div style="font-size:22px;font-weight:700;color:${col}">${fr >= 0 ? '+' : ''}${fr.toFixed(4)}%</div>
+        <div style="font-size:11px;color:${col};margin-top:2px">${fa.signal || '--'}</div>
+      </div>
+      <div style="text-align:right;font-size:11px;color:var(--text3);line-height:1.7">
+        <div>下次结算 <span style="color:var(--text1)">${nextStr}</span></div>
+        <div>${Math.round((hist.length||90)*8/24)}天均值 <span style="color:var(--text1)">${fa.avg_nd != null ? (fa.avg_nd >= 0 ? '+' : '') + fa.avg_nd + '%' : '--'}</span></div>
+        <div>费率趋势 <span style="color:var(--text1)">${fa.trend || '--'}</span></div>
+      </div>
+    </div>
+    ${pctBar}
+    ${miniChart}
+    <div style="font-size:11px;color:var(--text2);line-height:1.55;margin-top:4px;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px">
+      <span style="color:${col}">📊 研判：</span>${fa.interp || '--'}
+    </div>
+    <div style="font-size:11px;color:#b0bec5;margin-top:6px;line-height:1.55">
+      <span style="color:var(--text3)">💡 操作建议：</span>${fa.action || '--'}
+    </div>
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border2);display:flex;gap:12px">
+      <div style="flex:1;text-align:center">
+        <div style="font-size:10px;color:var(--text3)">持仓量(张)</div>
+        <div style="font-size:12px;font-weight:600">${oiCoins}</div>
+      </div>
+      <div style="flex:1;text-align:center">
+        <div style="font-size:10px;color:var(--text3)">持仓价值</div>
+        <div style="font-size:12px;font-weight:600">${oiUsdt}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* 共用 HTML 构建函数 */
+function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
   const C = s => s > 0 ? 'var(--bull)' : (s < 0 ? 'var(--bear)' : 'var(--neutral)');
-
-  // 均线行
   let maRows = '';
-  (rd.ma || []).forEach(m => {
+  (rd.ma||[]).forEach(m => {
     const c = m.above ? 'var(--bull)' : 'var(--bear)';
     const a = m.above ? '▲' : '▼';
-    maRows += `<tr>
-      <td style="font-weight:600">${m.name}</td>
-      <td style="color:#78909c">${m.desc}</td>
-      <td>${fmt(m.val)}</td>
-      <td style="color:${c}">${a} ${m.diff_pct >= 0 ? '+' : ''}${m.diff_pct.toFixed(2)}%</td>
-    </tr>`;
+    maRows += `<tr><td style="font-weight:600">${m.name}</td><td style="color:#78909c">${m.desc}</td><td>${fmt(m.val)}</td><td style="color:${c}">${a} ${m.diff_pct >= 0?'+':''}${m.diff_pct.toFixed(2)}%</td></tr>`;
   });
-
-  // 支撑/阻力行
-  let srRows = (resistances || []).map(r =>
+  const srRows = (resistances||[]).map(r =>
     `<tr><td style="color:var(--bear)">阻力</td><td>${fmt(r.price)}</td><td style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</td></tr>`
-  ).join('') + (supports || []).map(s =>
+  ).join('') + (supports||[]).map(s =>
     `<tr><td style="color:var(--bull)">支撑</td><td>${fmt(s.price)}</td><td style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</td></tr>`
   ).join('');
-
-  // Fibonacci 行
-  let fibRows = (fib || []).sort((a,b) => b.price - a.price).map(f => {
+  const fibRows = (fib||[]).sort((a,b)=>b.price-a.price).map(f => {
     const near = f.near ? ' <span style="color:var(--neutral)">← 附近</span>' : '';
-    const c    = f.near ? 'var(--neutral)' : '#78909c';
-    return `<tr><td style="color:${c}">${f.label}</td><td style="color:${c}">${fmt(f.price)}</td><td style="color:${c}">${f.dist_pct >= 0 ? '+' : ''}${f.dist_pct.toFixed(2)}%${near}</td></tr>`;
+    const c = f.near ? 'var(--neutral)' : '#78909c';
+    return `<tr><td style="color:${c}">${f.label}</td><td style="color:${c}">${fmt(f.price)}</td><td style="color:${c}">${f.dist_pct>=0?'+':''}${f.dist_pct.toFixed(2)}%${near}</td></tr>`;
   }).join('');
-
-  // 综合评分
   const bullW = Math.max(0, rd.score) / rd.max_score * 100;
-  const bearW = Math.max(0, -rd.score) / rd.max_score * 100;
+  const bearW = Math.max(0,-rd.score) / rd.max_score * 100;
   const oc    = rd.overall_color || 'var(--neutral)';
-
-  // MA 总分
-  const maTotal = (rd.ma||[]).reduce((s,m) => s + (m.above ? 1 : -1), 0);
-
-  sidebar.innerHTML = `
-    <!-- 综合信号 -->
+  const maTotal = (rd.ma||[]).reduce((s,m) => s+(m.above?1:-1), 0);
+  return `
+    ${buildComprehensiveOpinion(rd, funding)}
     <div class="card">
-      <div class="card-title">综合信号 [${TF_LABELS[tf]}]</div>
+      <div class="card-title">综合信号 [${TF_LABELS_FULL[tf]||tf}]</div>
       <div class="overall-box" style="border-left-color:${oc}">
         <div class="overall-text" style="color:${oc}">${rd.overall}</div>
         <div class="score-bar">
@@ -435,297 +1084,387 @@ function updateSidebar(tf) {
       </div>
       <table>
         <tr><th>指标</th><th>评分</th></tr>
-        <tr><td>均线(5项)</td><td style="color:${C(maTotal)}">${maTotal >= 0 ? '+' : ''}${maTotal}</td></tr>
-        <tr><td>RSI</td><td style="color:${C(rd.rsi.score)}">${rd.rsi.score >= 0 ? '+' : ''}${rd.rsi.score}</td></tr>
-        <tr><td>布林带</td><td style="color:${C(rd.bb.score)}">${rd.bb.score >= 0 ? '+' : ''}${rd.bb.score}</td></tr>
-        <tr><td>MACD</td><td style="color:${C(rd.macd.score)}">${rd.macd.score >= 0 ? '+' : ''}${rd.macd.score}</td></tr>
-        <tr><td>KDJ</td><td style="color:${C(rd.kdj.score)}">${rd.kdj.score >= 0 ? '+' : ''}${rd.kdj.score}</td></tr>
-        <tr><td>OBV</td><td style="color:${C(rd.obv.score)}">${rd.obv.score >= 0 ? '+' : ''}${rd.obv.score}</td></tr>
-        <tr style="font-weight:700;border-top:1px solid #2a2e39">
-          <td>合计</td><td style="color:${oc}">${rd.score >= 0 ? '+' : ''}${rd.score} / ${rd.max_score}</td></tr>
+        <tr><td>均线(5项)</td><td style="color:${C(maTotal)}">${maTotal>=0?'+':''}${maTotal}</td></tr>
+        <tr><td>RSI</td><td style="color:${C(rd.rsi.score)}">${rd.rsi.score>=0?'+':''}${rd.rsi.score}</td></tr>
+        <tr><td>布林带</td><td style="color:${C(rd.bb.score)}">${rd.bb.score>=0?'+':''}${rd.bb.score}</td></tr>
+        <tr><td>MACD</td><td style="color:${C(rd.macd.score)}">${rd.macd.score>=0?'+':''}${rd.macd.score}</td></tr>
+        <tr><td>KDJ</td><td style="color:${C(rd.kdj.score)}">${rd.kdj.score>=0?'+':''}${rd.kdj.score}</td></tr>
+        <tr><td>OBV</td><td style="color:${C(rd.obv.score)}">${rd.obv.score>=0?'+':''}${rd.obv.score}</td></tr>
+        <tr style="font-weight:700;border-top:1px solid #2a2e39"><td>合计</td><td style="color:${oc}">${rd.score>=0?'+':''}${rd.score} / ${rd.max_score}</td></tr>
       </table>
     </div>
-
-    <!-- 均线系统 -->
     <div class="card">
       <div class="card-title">均线系统</div>
-      <table>
-        <tr><th>均线</th><th>含义</th><th>价格</th><th>偏离</th></tr>
-        ${maRows}
-      </table>
+      <table><tr><th>均线</th><th>含义</th><th>价格</th><th>偏离</th></tr>${maRows}</table>
     </div>
-
-    <!-- 振荡指标 -->
     <div class="card">
       <div class="card-title">振荡指标</div>
-      <div class="row">
-        <span class="row-label">RSI (14)</span>
-        <span class="row-val" style="color:${C(rd.rsi.score)}">${fmtN(rd.rsi.val)}</span>
-      </div>
-      <div class="row"><span class="row-label" style="margin-left:85px"></span>
-        <span class="row-sig" style="color:${C(rd.rsi.score)}">${rd.rsi.signal}</span>
-      </div>
-      <div class="row">
-        <span class="row-label">KDJ K/D/J</span>
-        <span class="row-val" style="color:${C(rd.kdj.score)}">${fmtN(rd.kdj.k)} / ${fmtN(rd.kdj.d)} / ${fmtN(rd.kdj.j)}</span>
-      </div>
-      <div class="row"><span class="row-label" style="margin-left:85px"></span>
-        <span class="row-sig" style="color:${C(rd.kdj.score)}">${rd.kdj.signal}</span>
-      </div>
+      <div class="row"><span class="row-label">RSI (14)</span><span class="row-val" style="color:${C(rd.rsi.score)}">${fmtN(rd.rsi.val)}</span></div>
+      <div class="row"><span class="row-label"></span><span class="row-sig" style="color:${C(rd.rsi.score)}">${rd.rsi.signal}</span></div>
+      <div class="row"><span class="row-label">KDJ K/D/J</span><span class="row-val" style="color:${C(rd.kdj.score)}">${fmtN(rd.kdj.k)} / ${fmtN(rd.kdj.d)} / ${fmtN(rd.kdj.j)}</span></div>
+      <div class="row"><span class="row-label"></span><span class="row-sig" style="color:${C(rd.kdj.score)}">${rd.kdj.signal}</span></div>
     </div>
-
-    <!-- 布林带 -->
     <div class="card">
       <div class="card-title">布林带 (20, 2σ)</div>
       <div class="row"><span class="row-label">上轨</span><span class="row-val bear">${fmt(rd.bb.upper)}</span></div>
       <div class="row"><span class="row-label">中轨</span><span class="row-val neutral">${fmt(rd.bb.mid)}</span></div>
       <div class="row"><span class="row-label">下轨</span><span class="row-val bull">${fmt(rd.bb.lower)}</span></div>
       <div class="row"><span class="row-label">带宽</span><span class="row-val">${rd.bb.width_pct.toFixed(2)}%</span></div>
-      <div class="row"><span class="row-label">当前位置</span><span class="row-sig" style="color:${C(rd.bb.score)}">${rd.bb.signal}</span></div>
+      <div class="row"><span class="row-label">位置</span><span class="row-sig" style="color:${C(rd.bb.score)}">${rd.bb.signal}</span></div>
     </div>
-
-    <!-- MACD -->
     <div class="card">
       <div class="card-title">MACD (12, 26, 9)</div>
       <div class="row"><span class="row-label">MACD线</span><span class="row-val">${fmtN(rd.macd.val)}</span></div>
       <div class="row"><span class="row-label">信号线</span><span class="row-val">${fmtN(rd.macd.signal_line)}</span></div>
       <div class="row"><span class="row-label">柱状图</span><span class="row-val" style="color:${C(rd.macd.score)}">${fmtN(rd.macd.hist)}</span></div>
       <div class="row"><span class="row-label">信号</span><span class="row-sig" style="color:${C(rd.macd.score)}">${rd.macd.signal}</span></div>
-      <div class="row"><span class="row-label">动能</span><span class="row-sig" style="color:#78909c">${rd.macd.hist_trend}</span></div>
     </div>
-
-    <!-- OBV -->
     <div class="card">
       <div class="card-title">OBV 能量潮</div>
       <div class="row"><span class="row-label">当前OBV</span><span class="row-val">${rd.obv.now.toLocaleString()}</span></div>
-      <div class="row"><span class="row-label">20根前</span><span class="row-val">${rd.obv.prev.toLocaleString()}</span></div>
       <div class="row"><span class="row-label">趋势</span><span class="row-sig" style="color:${C(rd.obv.score)}">${rd.obv.trend}</span></div>
     </div>
-
-    <!-- 支撑/阻力 -->
+    ${rd.vwap ? `
+    <div class="card">
+      <div class="card-title">VWAP · 成交量加权均价</div>
+      <div class="row"><span class="row-label">VWAP</span><span class="row-val" style="color:#ff9800">${fmt(rd.vwap.val)}</span></div>
+      <div class="row"><span class="row-label">偏离</span><span class="row-val" style="color:${rd.vwap.above?'var(--bull)':'var(--bear)'}">
+        ${rd.vwap.above ? '▲' : '▼'} ${rd.vwap.diff_pct >= 0 ? '+' : ''}${rd.vwap.diff_pct.toFixed(2)}%
+      </span></div>
+      <div class="row"><span class="row-label">位置</span><span class="row-sig" style="color:${rd.vwap.above?'var(--bull)':'var(--bear)'}">
+        ${rd.vwap.above ? '价格在 VWAP 上方，多方占优' : '价格在 VWAP 下方，空方占优'}
+      </span></div>
+    </div>` : ''}
+    ${rd.atr ? `
+    <div class="card">
+      <div class="card-title">ATR · 风险管理</div>
+      <div class="row"><span class="row-label">ATR (14)</span><span class="row-val">${fmt(rd.atr.val)} <span style="color:var(--text2)">(${rd.atr.pct.toFixed(2)}%)</span></span></div>
+      <div class="row"><span class="row-label">做多止损</span><span class="row-val bull">${fmt(rd.atr.sl_long)} <span style="color:var(--text2)">(-${rd.atr.sl_long_dist_pct.toFixed(2)}%)</span></span></div>
+      <div class="row"><span class="row-label">做空止损</span><span class="row-val bear">${fmt(rd.atr.sl_short)} <span style="color:var(--text2)">(+${rd.atr.sl_short_dist_pct.toFixed(2)}%)</span></span></div>
+      <div class="row" style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border2)">
+        <span class="row-label" style="color:var(--text3);font-size:11px">止损 = 当前价 ± 1.5 × ATR</span>
+      </div>
+    </div>` : ''}
+    ${buildFundingCard(funding)}
     <div class="card">
       <div class="card-title">支撑 / 阻力位</div>
-      <table>
-        <tr><th>类型</th><th>价格</th><th>距当前</th></tr>
-        ${srRows}
-      </table>
+      <table><tr><th>类型</th><th>价格</th><th>距当前</th></tr>${srRows}</table>
     </div>
-
-    <!-- Fibonacci -->
     <div class="card">
       <div class="card-title">Fibonacci 回调位</div>
-      <table>
-        <tr><th>位置</th><th>价格</th><th>距当前</th></tr>
-        ${fibRows}
-      </table>
-    </div>
-  `;
+      <table><tr><th>位置</th><th>价格</th><th>距当前</th></tr>${fibRows}</table>
+    </div>`;
 }
 
-// ─────────────────────────────────────────────
-// 获取 K 线并渲染 Plotly 图表
-// ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════
+   手机端信号面板
+══════════════════════════════════════════════════════ */
+function updateMobileSignals() {
+  const panel = document.getElementById('panel-signals');
+  if (!panel) return;
+  // 多周期信号 Grid
+  let gridHTML = '<div class="signals-grid">';
+  TF_LIST.forEach(tf => {
+    const data = analysisData[tf]; if (!data) return;
+    const rd  = data.rd;
+    const cls = sc(rd.score);
+    const oc  = rd.overall_color || 'var(--neutral)';
+    const bw  = Math.max(0, rd.score) / rd.max_score * 100;
+    const rw  = Math.max(0,-rd.score) / rd.max_score * 100;
+    gridHTML += `
+      <div class="sig-card" onclick="switchTf('${tf}');switchMobileTab('chart',document.querySelector('[data-tab=chart]'))">
+        <div class="sig-card-tf">${TF_LABELS_FULL[tf]||tf}</div>
+        <div class="sig-card-score" style="color:${oc}">${rd.score>=0?'+':''}${rd.score}</div>
+        <div class="sig-card-text" style="color:${oc}">${rd.overall.split('(')[0].trim()}</div>
+        <div class="sig-bar">
+          <div class="sig-bar-bull" style="width:${bw.toFixed(1)}%"></div>
+          <div class="sig-bar-bear" style="width:${rw.toFixed(1)}%"></div>
+        </div>
+      </div>`;
+  });
+  gridHTML += '</div>';
+
+  // 当前周期 S/R 汇总
+  const cur = analysisData[currentTf];
+  let srHTML = '';
+  if (cur) {
+    srHTML = `<div class="sr-section">
+      <h3>当前周期 [${TF_LABELS_FULL[currentTf]||currentTf}] 支撑/阻力</h3>
+      ${(cur.resistances||[]).map(r=>`<div class="sr-row"><span style="color:var(--bear)">阻力</span><span>${fmt(r.price)}</span><span style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</span></div>`).join('')}
+      ${(cur.supports||[]).map(s=>`<div class="sr-row"><span style="color:var(--bull)">支撑</span><span>${fmt(s.price)}</span><span style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</span></div>`).join('')}
+    </div>`;
+  }
+  panel.innerHTML = gridHTML + srHTML;
+}
+
+/* ══════════════════════════════════════════════════════
+   获取 K 线 → 渲染
+══════════════════════════════════════════════════════ */
+function showChartLoading(show) {
+  const d = document.getElementById('chartLoading');
+  const m = document.getElementById('mChartLoading');
+  if (d) d.style.display = show ? 'flex' : 'none';
+  if (m) m.style.display = show ? 'flex' : 'none';
+  const s = document.getElementById('chartStatus');
+  if (s && show) s.textContent = '加载中...';
+}
+
 async function fetchKlinesAndRender(tf) {
-  const loading = document.getElementById('chartLoading');
-  const status  = document.getElementById('chartStatus');
-  if (loading) loading.style.display = 'flex';
-  if (status)  status.textContent = '加载中...';
+  showChartLoading(true);
   try {
     const r = await fetch(`/api/klines/${tf}?symbol=${currentSymbol}`);
-    if (!r.ok) {
-      if (status) status.textContent = '数据未就绪';
-      if (loading) loading.style.display = 'none';
-      return;
-    }
+    if (!r.ok) { showChartLoading(false); return; }
     const d = await r.json();
-    document.getElementById('chartTfLabel').textContent = TF_LABELS[tf] || tf;
-    if (status) status.textContent = `${d.candles.length} 根K线`;
-    renderChart(d.candles, d.supports, d.resistances, d.fib, tf);
-    if (loading) loading.style.display = 'none';
-  } catch(e) {
-    if (status)  status.textContent = '加载失败';
-    if (loading) loading.style.display = 'none';
-    console.warn('klines fetch failed', e);
-  }
+    const ctl = document.getElementById('chartTfLabel');
+    if (ctl) ctl.textContent = TF_LABELS_FULL[tf] || tf;
+    const s = document.getElementById('chartStatus');
+    if (s) s.textContent = `${d.candles.length} 根K线`;
+    // 桌面：6面板完整图
+    renderDesktopChart(d.candles, d.supports, d.resistances, d.fib, tf);
+    // 手机：主K线图（2面板）
+    renderMainChart(d.candles, d.supports, d.resistances, d.fib, tf);
+    showChartLoading(false);
+    // 如果手机副图正在显示，同步渲染
+    if (isMobile && mobileTab === 'sub') renderSubChart(d.candles);
+  } catch(e) { showChartLoading(false); console.warn('klines fetch failed', e); }
 }
 
-// ─────────────────────────────────────────────
-// Plotly 图表渲染
-// ─────────────────────────────────────────────
-function renderChart(candles, supports, resistances, fib, tf) {
-  const T = candles.map(c => c.t);
-  const O = candles.map(c => c.o);
-  const H = candles.map(c => c.h);
-  const L = candles.map(c => c.l);
-  const C = candles.map(c => c.c);
-  const V = candles.map(c => c.v);
+async function fetchSubChart(tf) {
+  const sl = document.getElementById('mSubLoading');
+  if (sl) sl.style.display = 'flex';
+  try {
+    const r = await fetch(`/api/klines/${tf}?symbol=${currentSymbol}`);
+    if (!r.ok) { if(sl) sl.style.display='none'; return; }
+    const d = await r.json();
+    renderSubChart(d.candles);
+    if (sl) sl.style.display = 'none';
+  } catch(e) { if(sl) sl.style.display='none'; console.warn(e); }
+}
 
-  const get = key => noNaN(candles.map(c => c[key]));
-  const volColors      = candles.map(c => c.c >= c.o ? '#26a69a' : '#ef5350');
-  const macdHistColors = candles.map(c => (c.macd_hist||0) >= 0 ? '#26a69a' : '#ef5350');
+/* ══════════════════════════════════════════════════════
+   共用：Y轴范围计算 + Shape 过滤（桌面和手机共用）
+══════════════════════════════════════════════════════ */
+function calcYRange(candles) {
+  const H = candles.map(c=>c.h).filter(v=>v!=null&&!isNaN(v));
+  const L = candles.map(c=>c.l).filter(v=>v!=null&&!isNaN(v));
+  const pMin = Math.min(...L), pMax = Math.max(...H);
+  const pad  = (pMax - pMin) * 0.05;
+  return [pMin - pad, pMax + pad];
+}
 
-  // ── 计算 K 线价格范围，用于 Y 轴固定区间（避免 Fib 把范围拉太远）──
-  const validH = H.filter(v => v != null && !isNaN(v));
-  const validL = L.filter(v => v != null && !isNaN(v));
-  const pMin = Math.min(...validL);
-  const pMax = Math.max(...validH);
-  const pad  = (pMax - pMin) * 0.05;     // 上下各留 5% 空间
-  const yMin = pMin - pad;
-  const yMax = pMax + pad;
+function buildSRShapes(candles, supports, resistances, fib, yRange) {
+  const T  = candles.map(c=>c.t);
+  const x0 = T[0], x1 = T[T.length-1];
+  const [yMin, yMax] = yRange;
+  const inView = price => price >= yMin * 0.9 && price <= yMax * 1.1;
+  const shapes = [], anns = [];
 
-  // ── 只保留价格在可视范围内（±10%）的 S/R 和 Fib 线 ──
-  const visRange = (pMax - pMin) * 0.10;
-  const inView   = price => price >= (yMin - visRange) && price <= (yMax + visRange);
-
-  const shapes = [];
-  const anns   = [];
-  const x0 = T[0], x1 = T[T.length - 1];
-
-  // 支撑/阻力
-  (resistances||[]).filter(r => inView(r.price)).forEach(r => {
-    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:r.price, y1:r.price,
-      line:{color:'rgba(239,83,80,0.7)', width:1.2, dash:'dot'}});
-    anns.push({xref:'paper', yref:'y', x:1.01, y:r.price,
-      text:`阻 ${Math.round(r.price).toLocaleString()}`,
-      showarrow:false, font:{color:'#ef5350', size:10}, xanchor:'left'});
+  (resistances||[]).filter(r=>inView(r.price)).forEach(r => {
+    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:r.price,y1:r.price,line:{color:'rgba(239,83,80,0.7)',width:1.2,dash:'dot'}});
+    anns.push({xref:'paper',yref:'y',x:1.01,y:r.price,text:`阻 ${Math.round(r.price).toLocaleString()}`,showarrow:false,font:{color:'#ef5350',size:10},xanchor:'left'});
   });
-  (supports||[]).filter(s => inView(s.price)).forEach(s => {
-    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:s.price, y1:s.price,
-      line:{color:'rgba(38,166,154,0.7)', width:1.2, dash:'dot'}});
-    anns.push({xref:'paper', yref:'y', x:1.01, y:s.price,
-      text:`撑 ${Math.round(s.price).toLocaleString()}`,
-      showarrow:false, font:{color:'#26a69a', size:10}, xanchor:'left'});
+  (supports||[]).filter(s=>inView(s.price)).forEach(s => {
+    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:s.price,y1:s.price,line:{color:'rgba(38,166,154,0.7)',width:1.2,dash:'dot'}});
+    anns.push({xref:'paper',yref:'y',x:1.01,y:s.price,text:`撑 ${Math.round(s.price).toLocaleString()}`,showarrow:false,font:{color:'#26a69a',size:10},xanchor:'left'});
   });
-
-  // Fibonacci（仅显示在可视范围内的位）
   const fibColors = ['#b0bec5','#80cbc4','#ffcc02','#ff9800','#ff5722','#e91e63','#9c27b0'];
-  const sortedFib = [...(fib||[])].sort((a,b) => b.price - a.price).filter(f => inView(f.price));
-  sortedFib.forEach((f, i) => {
-    const fc = fibColors[i % fibColors.length];
-    shapes.push({type:'line', xref:'x', yref:'y', x0, x1, y0:f.price, y1:f.price,
-      line:{color:fc, width:0.8, dash:'dash'}});
-    anns.push({xref:'paper', yref:'y', x:0, y:f.price,
-      text:f.label, showarrow:false,
-      font:{color:fc, size:9}, xanchor:'right'});
+  [...(fib||[])].sort((a,b)=>b.price-a.price).filter(f=>inView(f.price)).forEach((f,i) => {
+    const fc = fibColors[i%fibColors.length];
+    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:f.price,y1:f.price,line:{color:fc,width:0.8,dash:'dash'}});
+    anns.push({xref:'paper',yref:'y',x:0,y:f.price,text:f.label,showarrow:false,font:{color:fc,size:9},xanchor:'right'});
   });
+  return { shapes, anns, x0, x1 };
+}
 
-  // RSI 超买/超卖线
-  [70, 30].forEach(lv => {
-    shapes.push({type:'line', xref:'x4', yref:'y4', x0, x1, y0:lv, y1:lv,
-      line:{color:lv===70?'rgba(239,83,80,0.4)':'rgba(38,166,154,0.4)', width:1, dash:'dash'}});
-  });
-  // KDJ 超买/超卖线
-  [80, 20].forEach(lv => {
-    shapes.push({type:'line', xref:'x5', yref:'y5', x0, x1, y0:lv, y1:lv,
-      line:{color:'rgba(255,255,255,0.15)', width:1, dash:'dash'}});
-  });
+/* ══════════════════════════════════════════════════════
+   桌面端：完整6面板图（原有逻辑完整保留）
+══════════════════════════════════════════════════════ */
+function renderDesktopChart(candles, supports, resistances, fib, tf) {
+  const el = document.getElementById('chart-desktop');
+  if (!el) return;
+  const T = candles.map(c=>c.t), O=candles.map(c=>c.o), H=candles.map(c=>c.h);
+  const L = candles.map(c=>c.l), C=candles.map(c=>c.c), V=candles.map(c=>c.v);
+  const get = key => noNaN(candles.map(c=>c[key]));
+  const volColors      = candles.map(c=>c.c>=c.o?'#26a69a':'#ef5350');
+  const macdHistColors = candles.map(c=>(c.macd_hist||0)>=0?'#26a69a':'#ef5350');
+
+  const [yMin, yMax] = calcYRange(candles);
+  const { shapes, anns, x0, x1 } = buildSRShapes(candles, supports, resistances, fib, [yMin, yMax]);
+
+  [70,30].forEach(lv => shapes.push({type:'line',xref:'x5',yref:'y5',x0,x1,y0:lv,y1:lv,line:{color:lv===70?'rgba(239,83,80,0.4)':'rgba(38,166,154,0.4)',width:1,dash:'dash'}}));
+  [80,20].forEach(lv => shapes.push({type:'line',xref:'x6',yref:'y6',x0,x1,y0:lv,y1:lv,line:{color:'rgba(255,255,255,0.15)',width:1,dash:'dash'}}));
 
   const traces = [
-    // ─ Row1: K线 + 均线 + 布林带
-    {type:'candlestick', x:T, open:O, high:H, low:L, close:C, name:'K线',
-     increasing:{line:{color:'#26a69a'}, fillcolor:'rgba(38,166,154,0.75)'},
-     decreasing:{line:{color:'#ef5350'}, fillcolor:'rgba(239,83,80,0.75)'},
-     xaxis:'x', yaxis:'y', showlegend:false, line:{width:1}},
-
-    {type:'scatter', x:T, y:get('ma20'),  name:'MA20',  line:{color:'#f9a825',width:1.2}, xaxis:'x', yaxis:'y'},
-    {type:'scatter', x:T, y:get('ma50'),  name:'MA50',  line:{color:'#ab47bc',width:1.2}, xaxis:'x', yaxis:'y'},
-    {type:'scatter', x:T, y:get('ma200'), name:'MA200', line:{color:'#ef5350',width:1.2}, xaxis:'x', yaxis:'y'},
-    {type:'scatter', x:T, y:get('ema20'), name:'EMA20', line:{color:'#29b6f6',width:1,dash:'dot'}, xaxis:'x', yaxis:'y'},
-    {type:'scatter', x:T, y:get('ema50'), name:'EMA50', line:{color:'#66bb6a',width:1,dash:'dot'}, xaxis:'x', yaxis:'y'},
-
-    {type:'scatter', x:T, y:get('bb_upper'), name:'BB上', line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'}, xaxis:'x', yaxis:'y', showlegend:false},
-    {type:'scatter', x:T, y:get('bb_lower'), name:'BB下', line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},
-     fill:'tonexty', fillcolor:'rgba(100,181,246,0.04)', xaxis:'x', yaxis:'y', showlegend:false},
-
-    // ─ Row2: 成交量（独立Y轴，不叠加OBV避免刻度混乱）
-    {type:'bar', x:T, y:V, name:'成交量', marker:{color:volColors}, xaxis:'x2', yaxis:'y2', showlegend:false, opacity:0.75},
-
-    // ─ Row3: OBV（独立面板，归一化展示）
-    {type:'scatter', x:T, y:get('obv'), name:'OBV', line:{color:'#ffb300',width:1.5}, xaxis:'x3', yaxis:'y3'},
-
-    // ─ Row4: MACD
-    {type:'bar',     x:T, y:get('macd_hist'),    name:'MACD柱', marker:{color:macdHistColors}, xaxis:'x4', yaxis:'y4', showlegend:false},
-    {type:'scatter', x:T, y:get('macd'),          name:'MACD',   line:{color:'#29b6f6',width:1.5}, xaxis:'x4', yaxis:'y4'},
-    {type:'scatter', x:T, y:get('macd_signal'),   name:'Signal', line:{color:'#ff7043',width:1.5}, xaxis:'x4', yaxis:'y4'},
-
-    // ─ Row5: RSI
-    {type:'scatter', x:T, y:get('rsi'), name:'RSI', line:{color:'#ce93d8',width:1.5}, xaxis:'x5', yaxis:'y5'},
-
-    // ─ Row6: KDJ
-    {type:'scatter', x:T, y:get('kdj_k'), name:'K', line:{color:'#66bb6a',width:1.2}, xaxis:'x6', yaxis:'y6'},
-    {type:'scatter', x:T, y:get('kdj_d'), name:'D', line:{color:'#ef5350',width:1.2}, xaxis:'x6', yaxis:'y6'},
-    {type:'scatter', x:T, y:get('kdj_j'), name:'J', line:{color:'#ffb300',width:1.2,dash:'dot'}, xaxis:'x6', yaxis:'y6'},
+    {type:'candlestick',x:T,open:O,high:H,low:L,close:C,name:'K线',
+     increasing:{line:{color:'#26a69a'},fillcolor:'rgba(38,166,154,0.75)'},
+     decreasing:{line:{color:'#ef5350'},fillcolor:'rgba(239,83,80,0.75)'},
+     xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('ma20'),  name:'MA20',  line:{color:'#f9a825',width:1.2},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ma50'),  name:'MA50',  line:{color:'#ab47bc',width:1.2},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ma200'), name:'MA200', line:{color:'#ef5350',width:1.2},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ema20'), name:'EMA20', line:{color:'#29b6f6',width:1,dash:'dot'},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ema50'), name:'EMA50', line:{color:'#66bb6a',width:1,dash:'dot'},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('bb_upper'),name:'BB上',line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('bb_lower'),name:'BB下',line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},fill:'tonexty',fillcolor:'rgba(100,181,246,0.04)',xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('vwap'),name:'VWAP',line:{color:'#ff9800',width:1.5,dash:'dashdot'},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('atr_sl_long'), name:'ATR止多',line:{color:'rgba(38,166,154,0.6)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
+    {type:'scatter',x:T,y:get('atr_sl_short'),name:'ATR止空',line:{color:'rgba(239,83,80,0.6)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
+    {type:'bar',x:T,y:V,name:'成交量',marker:{color:volColors},xaxis:'x2',yaxis:'y2',showlegend:false,opacity:0.75},
+    {type:'scatter',x:T,y:get('obv'),name:'OBV',line:{color:'#ffb300',width:1.5},xaxis:'x3',yaxis:'y3'},
+    {type:'bar',x:T,y:get('macd_hist'),name:'MACD柱',marker:{color:macdHistColors},xaxis:'x4',yaxis:'y4',showlegend:false},
+    {type:'scatter',x:T,y:get('macd'),       name:'MACD',  line:{color:'#29b6f6',width:1.5},xaxis:'x4',yaxis:'y4'},
+    {type:'scatter',x:T,y:get('macd_signal'),name:'Signal',line:{color:'#ff7043',width:1.5},xaxis:'x4',yaxis:'y4'},
+    {type:'scatter',x:T,y:get('rsi'),name:'RSI',line:{color:'#ce93d8',width:1.5},xaxis:'x5',yaxis:'y5'},
+    {type:'scatter',x:T,y:get('kdj_k'),name:'K',line:{color:'#66bb6a',width:1.2},xaxis:'x6',yaxis:'y6'},
+    {type:'scatter',x:T,y:get('kdj_d'),name:'D',line:{color:'#ef5350',width:1.2},xaxis:'x6',yaxis:'y6'},
+    {type:'scatter',x:T,y:get('kdj_j'),name:'J',line:{color:'#ffb300',width:1.2,dash:'dot'},xaxis:'x6',yaxis:'y6'},
   ];
 
-  // 更新 KDJ shapes（xref 改为 x6）
-  shapes.forEach(s => {
-    if (s.xref === 'x5' && s.yref === 'y5') { s.xref = 'x6'; s.yref = 'y6'; }
-  });
-
-  const el  = document.getElementById('chart');
-  const elH = Math.max(el.clientHeight || 680, 500);
-
+  const h = Math.max(el.clientHeight||680, 500);
   const layout = {
     paper_bgcolor:'#131722', plot_bgcolor:'#131722',
-    font:{color:'#d1d4dc', size:11},
-    height: elH,
-    margin:{l:8, r:80, t:8, b:28},
+    font:{color:'#d1d4dc',size:11}, height:h,
+    margin:{l:8,r:80,t:8,b:28},
     showlegend:true,
-    legend:{orientation:'h', y:1.025, x:0, font:{size:10}, bgcolor:'rgba(0,0,0,0)', itemwidth:50},
-
-    // X 轴（共享）
-    xaxis:  {domain:[0,1], anchor:'y',  showgrid:true, gridcolor:'#1e2130', zeroline:false, rangeslider:{visible:false}, showticklabels:false},
-    xaxis2: {domain:[0,1], anchor:'y2', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
-    xaxis3: {domain:[0,1], anchor:'y3', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
-    xaxis4: {domain:[0,1], anchor:'y4', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
-    xaxis5: {domain:[0,1], anchor:'y5', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x', showticklabels:false},
-    xaxis6: {domain:[0,1], anchor:'y6', showgrid:true, gridcolor:'#1e2130', zeroline:false, matches:'x'},
-
-    // Y 轴（6个子图）
-    // Row1 K线 [50%~100%] —— 固定范围，防止 Fib 线撑大
-    yaxis:  {domain:[0.50,1.00], range:[yMin,yMax], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', tickformat:',.0f'},
-    // Row2 成交量 [40%~49%]
-    yaxis2: {domain:[0.40,0.49], showgrid:false, gridcolor:'#1e2130', zeroline:false, side:'right', showticklabels:false},
-    // Row3 OBV   [30%~39%]
-    yaxis3: {domain:[0.30,0.39], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', showticklabels:true,
-             tickformat:'.3s', title:{text:'OBV', font:{size:9,color:'#546e7a'}}},
-    // Row4 MACD  [20%~29%]
-    yaxis4: {domain:[0.20,0.29], showgrid:true, gridcolor:'#1e2130', zeroline:true,  zerolinecolor:'#2a2e39', side:'right'},
-    // Row5 RSI   [11%~19%]
-    yaxis5: {domain:[0.11,0.19], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', range:[0,100]},
-    // Row6 KDJ   [01%~10%]
-    yaxis6: {domain:[0.01,0.09], showgrid:true, gridcolor:'#1e2130', zeroline:false, side:'right', range:[0,100]},
-
+    legend:{orientation:'h',y:1.025,x:0,font:{size:10},bgcolor:'rgba(0,0,0,0)',itemwidth:50},
+    xaxis: {domain:[0,1],anchor:'y', showgrid:true,gridcolor:'#1e2130',zeroline:false,rangeslider:{visible:false},showticklabels:false},
+    xaxis2:{domain:[0,1],anchor:'y2',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis3:{domain:[0,1],anchor:'y3',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis4:{domain:[0,1],anchor:'y4',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis5:{domain:[0,1],anchor:'y5',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis6:{domain:[0,1],anchor:'y6',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x'},
+    yaxis: {domain:[0.50,1.00],range:[yMin,yMax],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',tickformat:',.0f'},
+    yaxis2:{domain:[0.40,0.49],showgrid:false,gridcolor:'#1e2130',zeroline:false,side:'right',showticklabels:false},
+    yaxis3:{domain:[0.30,0.39],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',tickformat:'.3s',title:{text:'OBV',font:{size:9,color:'#546e7a'}}},
+    yaxis4:{domain:[0.20,0.29],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right'},
+    yaxis5:{domain:[0.11,0.19],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
+    yaxis6:{domain:[0.01,0.09],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
     shapes, annotations:anns,
     hovermode:'x unified',
-    hoverlabel:{bgcolor:'#1a2035', bordercolor:'#2a2e39', font:{size:11}},
+    hoverlabel:{bgcolor:'#1a2035',bordercolor:'#2a2e39',font:{size:11}},
   };
-
-  const config = {
-    responsive:true, displayModeBar:true, scrollZoom:true,
-    modeBarButtonsToRemove:['lasso2d','select2d'],
-    displaylogo:false,
-  };
-
-  Plotly.react(el, traces, layout, config);
-  chartRendered = true;
+  Plotly.react(el, traces, layout, {responsive:true,displayModeBar:true,scrollZoom:true,modeBarButtonsToRemove:['lasso2d','select2d'],displaylogo:false});
 }
 
-// ─────────────────────────────────────────────
-// 初始化
-// ─────────────────────────────────────────────
-async function init() {
-  initSymbolSelect();
-  
-  // 立即获取价格
-  fetchPrice();
+/* ══════════════════════════════════════════════════════
+   手机端主图：K线 + 均线 + BB + 成交量（2面板）
+══════════════════════════════════════════════════════ */
+function renderMainChart(candles, supports, resistances, fib, tf) {
+  const el = document.getElementById('chart-main');
+  if (!el) return;
+  const T=candles.map(c=>c.t), O=candles.map(c=>c.o), H=candles.map(c=>c.h);
+  const L=candles.map(c=>c.l), C=candles.map(c=>c.c), V=candles.map(c=>c.v);
+  const get = key => noNaN(candles.map(c=>c[key]));
+  const volColors = candles.map(c=>c.c>=c.o?'#26a69a':'#ef5350');
 
-  // 轮询状态（5秒一次）
+  const [yMin, yMax] = calcYRange(candles);
+  const { shapes, anns } = buildSRShapes(candles, supports, resistances, fib, [yMin, yMax]);
+
+  const traces = [
+    {type:'candlestick',x:T,open:O,high:H,low:L,close:C,
+     increasing:{line:{color:'#26a69a'},fillcolor:'rgba(38,166,154,0.75)'},
+     decreasing:{line:{color:'#ef5350'},fillcolor:'rgba(239,83,80,0.75)'},
+     xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('ma20'), name:'MA20', line:{color:'#f9a825',width:1.5},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ma50'), name:'MA50', line:{color:'#ab47bc',width:1.5},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('ema20'),name:'EMA20',line:{color:'#29b6f6',width:1,dash:'dot'},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('bb_upper'),name:'BB',line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('bb_lower'),name:'BB下',line:{color:'rgba(100,181,246,.4)',width:1,dash:'dash'},fill:'tonexty',fillcolor:'rgba(100,181,246,0.04)',xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('vwap'),name:'VWAP',line:{color:'#ff9800',width:1.5,dash:'dashdot'},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('atr_sl_long'), name:'止多',line:{color:'rgba(38,166,154,0.7)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
+    {type:'scatter',x:T,y:get('atr_sl_short'),name:'止空',line:{color:'rgba(239,83,80,0.7)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
+    {type:'bar',x:T,y:V,name:'量',marker:{color:volColors},xaxis:'x2',yaxis:'y2',showlegend:false,opacity:0.75},
+  ];
+
+  const h = Math.max(el.clientHeight||500, 300);
+  const layout = {
+    paper_bgcolor:'#0e1117', plot_bgcolor:'#0e1117',
+    font:{color:'#d1d4dc',size:10}, height:h,
+    margin:{l:4,r:68,t:4,b:20},
+    showlegend:true,
+    legend:{orientation:'h',y:1.03,x:0,font:{size:10},bgcolor:'rgba(0,0,0,0)'},
+    xaxis: {domain:[0,1],anchor:'y', showgrid:true,gridcolor:'#1e2130',zeroline:false,rangeslider:{visible:false},showticklabels:false},
+    xaxis2:{domain:[0,1],anchor:'y2',showgrid:false,gridcolor:'#1e2130',zeroline:false,matches:'x'},
+    yaxis: {domain:[0.25,1.00],range:[yMin,yMax],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',tickformat:',.0f',tickfont:{size:9}},
+    yaxis2:{domain:[0.00,0.22],showgrid:false,zeroline:false,side:'right',showticklabels:false},
+    shapes, annotations:anns,
+    hovermode:'x unified',
+    hoverlabel:{bgcolor:'#1a2035',bordercolor:'#2a2e39',font:{size:11}},
+  };
+  Plotly.react(el, traces, layout, {responsive:true,displayModeBar:false,scrollZoom:true});
+}
+
+/* ══════════════════════════════════════════════════════
+   手机端副图：MACD + RSI + KDJ（3面板）
+══════════════════════════════════════════════════════ */
+function renderSubChart(candles) {
+  const el = document.getElementById('chart-sub');
+  if (!el) return;
+  const T = candles.map(c=>c.t);
+  const get = key => noNaN(candles.map(c=>c[key]));
+  const macdHistColors = candles.map(c=>(c.macd_hist||0)>=0?'#26a69a':'#ef5350');
+  const x0 = T[0], x1 = T[T.length-1];
+
+  const shapes = [
+    {type:'line',xref:'x2',yref:'y2',x0,x1,y0:70,y1:70,line:{color:'rgba(239,83,80,0.4)',width:1,dash:'dash'}},
+    {type:'line',xref:'x2',yref:'y2',x0,x1,y0:30,y1:30,line:{color:'rgba(38,166,154,0.4)',width:1,dash:'dash'}},
+    {type:'line',xref:'x3',yref:'y3',x0,x1,y0:80,y1:80,line:{color:'rgba(255,255,255,0.15)',width:1,dash:'dash'}},
+    {type:'line',xref:'x3',yref:'y3',x0,x1,y0:20,y1:20,line:{color:'rgba(255,255,255,0.15)',width:1,dash:'dash'}},
+  ];
+
+  const traces = [
+    {type:'bar',    x:T,y:get('macd_hist'),   name:'MACD柱',marker:{color:macdHistColors},xaxis:'x',yaxis:'y',showlegend:false},
+    {type:'scatter',x:T,y:get('macd'),        name:'MACD',  line:{color:'#29b6f6',width:1.5},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('macd_signal'), name:'Signal',line:{color:'#ff7043',width:1.5},xaxis:'x',yaxis:'y'},
+    {type:'scatter',x:T,y:get('rsi'),         name:'RSI',   line:{color:'#ce93d8',width:1.5},xaxis:'x2',yaxis:'y2'},
+    {type:'scatter',x:T,y:get('kdj_k'),       name:'K',     line:{color:'#66bb6a',width:1.2},xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',x:T,y:get('kdj_d'),       name:'D',     line:{color:'#ef5350',width:1.2},xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',x:T,y:get('kdj_j'),       name:'J',     line:{color:'#ffb300',width:1.2,dash:'dot'},xaxis:'x3',yaxis:'y3'},
+  ];
+
+  const h = Math.max(el.clientHeight||500, 300);
+  const layout = {
+    paper_bgcolor:'#0e1117', plot_bgcolor:'#0e1117',
+    font:{color:'#d1d4dc',size:10}, height:h,
+    margin:{l:4,r:50,t:4,b:20},
+    showlegend:true,
+    legend:{orientation:'h',y:1.03,x:0,font:{size:10},bgcolor:'rgba(0,0,0,0)'},
+    xaxis: {domain:[0,1],anchor:'y', showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',rangeslider:{visible:false},showticklabels:false},
+    xaxis2:{domain:[0,1],anchor:'y2',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis3:{domain:[0,1],anchor:'y3',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x'},
+    yaxis: {domain:[0.68,1.00],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right',tickfont:{size:9},title:{text:'MACD',font:{size:9,color:'#546e7a'}}},
+    yaxis2:{domain:[0.35,0.63],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'RSI',font:{size:9,color:'#546e7a'}}},
+    yaxis3:{domain:[0.02,0.30],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'KDJ',font:{size:9,color:'#546e7a'}}},
+    shapes, hovermode:'x unified',
+    hoverlabel:{bgcolor:'#1a2035',bordercolor:'#2a2e39',font:{size:11}},
+  };
+  Plotly.react(el, traces, layout, {responsive:true,displayModeBar:false,scrollZoom:true});
+}
+
+/* ══════════════════════════════════════════════════════
+   窗口尺寸变化处理
+══════════════════════════════════════════════════════ */
+window.addEventListener('resize', () => {
+  const wasMobile = isMobile;
+  isMobile = window.innerWidth < 768;
+  if (wasMobile !== isMobile && analysisData._ready) {
+    // 布局切换时重渲染图表
+    fetchKlinesAndRender(currentTf);
+  }
+});
+
+/* ══════════════════════════════════════════════════════
+   初始化
+══════════════════════════════════════════════════════ */
+async function init() {
+  initSymbolSelects();
+  buildMobileTfBar();
+  fetchPrice();
+  fetchFunding();
   await pollStatus();
   setInterval(pollStatus, 5000);
-
-  // 每10秒刷新价格
   setInterval(fetchPrice, 10000);
+  setInterval(fetchFunding, 30000);
 }
 
 init();

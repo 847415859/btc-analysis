@@ -50,12 +50,14 @@ class NumpyEncoder(JSONEncoder):
 
 app = Flask(__name__)
 app.json_encoder = NumpyEncoder
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 # ─────────────────────────────────────────────
 # 全局配置
 # ─────────────────────────────────────────────
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+# SYMBOLS = ["BTCUSDT"]
 REFRESH_INTERVAL = 300  # 5 分钟
 
 # 缓存结构:
@@ -108,7 +110,8 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
     ind_cols = ["ma20", "ma50", "ma200", "ema20", "ema50",
                 "rsi", "bb_upper", "bb_mid", "bb_lower",
                 "macd", "macd_signal", "macd_hist",
-                "kdj_k", "kdj_d", "kdj_j", "obv"]
+                "kdj_k", "kdj_d", "kdj_j", "obv",
+                "vwap", "atr", "atr_sl_long", "atr_sl_short"]
     plot_df = df.tail(chart_show).reset_index(drop=True)
     candles = []
     for _, row in plot_df.iterrows():
@@ -283,6 +286,178 @@ def live_price():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _analyze_funding(rate_pct: float, history: list) -> dict:
+    """
+    从资深交易员视角解读资金费率。
+    资金费率是逆向情绪指标：
+      极度正值 → 多头过拥挤 → 警惕多杀多（逆向看空）
+      极度负值 → 空头过拥挤 → 警惕空杀空（逆向看多）
+    """
+    rates = [h["rate"] for h in history] if history else [rate_pct]
+
+    # 百分位（当前费率在历史分布中的位置）
+    if len(rates) > 1:
+        percentile = round(sum(1 for r in rates if r <= rate_pct) / len(rates) * 100, 1)
+    else:
+        percentile = 50.0
+
+    avg_nd = round(sum(rates) / len(rates), 4)
+    days   = round(len(rates) * 8 / 24, 0)   # 实际覆盖天数
+
+    # 趋势：最近10期均值 vs 前10期均值
+    if len(rates) >= 20:
+        recent  = sum(rates[-10:]) / 10
+        earlier = sum(rates[-20:-10]) / 10
+        if   recent > earlier + 0.0005: trend = "上升"
+        elif recent < earlier - 0.0005: trend = "下降"
+        else:                           trend = "平稳"
+    else:
+        trend = "数据不足"
+
+    # 信号 + 逆向逻辑解读
+    if rate_pct >= 0.10:
+        signal = "极度偏多"
+        score  = -3   # 逆向：多头严重过热 → 情绪面偏空
+        color  = "#ef5350"
+        interp = "多头极度拥挤，历史上此水平后72h内常见5%-15%回调，警惕多杀多瀑布"
+        action = "谨慎追多，建议等待费率回落至0.05%以下再介入；持仓者考虑减仓对冲"
+    elif rate_pct >= 0.05:
+        signal = "偏多"
+        score  = -1
+        color  = "#ff9800"
+        interp = "多头情绪偏热，短期回调风险上升，但强势行情中费率可维持高位"
+        action = "控制杠杆，止损上移保护利润；不建议此时重仓追多"
+    elif rate_pct <= -0.10:
+        signal = "极度偏空"
+        score  = +3   # 逆向：空头严重过热 → 情绪面偏多
+        color  = "#26a69a"
+        interp = "空头极度拥挤，历史上此水平后常出现急速反弹，空头回补可推动10%+涨幅"
+        action = "关注反弹做多机会，但需结合支撑位确认；避免盲目追空"
+    elif rate_pct <= -0.05:
+        signal = "偏空"
+        score  = +1
+        color  = "#42a5f5"
+        interp = "空头情绪偏高，价格下行动能可能减弱，留意超卖反弹"
+        action = "空单注意止盈，关注能否出现价格背离信号"
+    elif -0.01 <= rate_pct <= 0.01:
+        signal = "中性"
+        score  = 0
+        color  = "#9e9e9e"
+        interp = "多空力量均衡，费率接近零值是最健康的市场状态，趋势可持续性较强"
+        action = "跟随主趋势操作，费率不构成额外阻力"
+    elif rate_pct > 0:
+        signal = "温和偏多"
+        score  = 0
+        color  = "#fdd835"
+        interp = "多头略占优，属正常牛市状态，暂无过热警示"
+        action = "正常持仓，关注费率是否持续攀升"
+    else:
+        signal = "温和偏空"
+        score  = 0
+        color  = "#fdd835"
+        interp = "空头略占优，属正常回调状态，暂无过冷警示"
+        action = "轻仓观望，关注支撑位是否有效"
+
+    return {
+        "signal":     signal,
+        "score":      score,
+        "color":      color,
+        "interp":     interp,
+        "action":     action,
+        "percentile": percentile,
+        "avg_nd":     avg_nd,     # 实际取样周期均值（约166天）
+        "days":       days,       # 实际覆盖天数（供前端标签）
+        "trend":      trend,
+        "extreme":    abs(rate_pct) >= 0.05,
+    }
+
+
+@app.route("/api/funding")
+def funding_data():
+    """资金费率 + 持仓量（合约市场实时数据，含历史 + 情绪分析）"""
+    symbol = request.args.get("symbol", "BTCUSDT")
+    result = {
+        "symbol":            symbol,
+        "funding_rate":      None,
+        "next_funding_time": None,
+        "open_interest":     None,
+        "open_interest_usdt": None,
+        "historical":        [],   # 最近500期历史费率（≈166天）
+        "oi_history":        [],   # 持仓量历史
+        "analysis":          None, # 情绪分析结论
+    }
+
+    # ── 历史资金费率（最近 500 期 ≈ 166 天，API 单次上限 1000）────────────────
+    try:
+        fr_r = req.get(
+            "https://fapi.binance.com/fapi/v1/fundingRate",
+            params={"symbol": symbol, "limit": 500},
+            timeout=8,
+        )
+        fr_list = fr_r.json()
+        if isinstance(fr_list, list) and fr_list:
+            historical = [
+                {"time": int(x["fundingTime"]),
+                 "rate": round(float(x["fundingRate"]) * 100, 4)}
+                for x in fr_list
+            ]
+            result["historical"]        = historical
+            latest                      = historical[-1]
+            result["funding_rate"]      = latest["rate"]
+            result["next_funding_time"] = fr_list[-1].get("fundingTime")
+            result["analysis"]          = _analyze_funding(latest["rate"], historical)
+    except Exception:
+        pass
+
+    # ── 合约持仓量（当前）──────────────────────────────
+    try:
+        oi_r = req.get(
+            "https://fapi.binance.com/fapi/v1/openInterest",
+            params={"symbol": symbol},
+            timeout=5,
+        )
+        oi_data = oi_r.json()
+        if "openInterest" in oi_data:
+            result["open_interest"] = float(oi_data["openInterest"])
+    except Exception:
+        pass
+
+    # ── 持仓量历史（4h 周期，最近 30 期）────────────────
+    try:
+        oih_r = req.get(
+            "https://fapi.binance.com/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": "4h", "limit": 30},
+            timeout=8,
+        )
+        oih_list = oih_r.json()
+        if isinstance(oih_list, list):
+            result["oi_history"] = [
+                {"time": int(x["timestamp"]),
+                 "oi":   round(float(x["sumOpenInterest"]), 2)}
+                for x in oih_list
+            ]
+    except Exception:
+        pass
+
+    # ── 持仓价值（USDT）————使用 ticker 推算 ─────────────
+    try:
+        if result["open_interest"] is not None:
+            tk_r = req.get(
+                "https://fapi.binance.com/fapi/v1/ticker/price",
+                params={"symbol": symbol},
+                timeout=5,
+            )
+            mark_price = float(tk_r.json().get("price", 0))
+            if mark_price > 0:
+                result["open_interest_usdt"] = round(
+                    result["open_interest"] * mark_price, 2
+                )
+    except Exception:
+        pass
+
+    return jsonify(result)
 
 
 # ─────────────────────────────────────────────

@@ -40,7 +40,8 @@ TIMEFRAMES = [
     ("1w",  200, "周线",    150, 100, 3, 0.025, 52),
 ]
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+# SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+SYMBOLS = ["BTCUSDT"]
 
 
 # ─────────────────────────────────────────────
@@ -106,6 +107,23 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     obv = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"])
     df["obv"] = obv.on_balance_volume()
+
+    # ── VWAP（按日重置）──────────────────────────────
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    dates = df["date"].dt.date
+    df["vwap"] = (
+        (tp * df["volume"]).groupby(dates).cumsum()
+        / df["volume"].groupby(dates).cumsum()
+    )
+
+    # ── ATR(14) + 止损线（1.5×ATR）────────────────────
+    atr_ind = ta.volatility.AverageTrueRange(
+        df["high"], df["low"], df["close"], window=14
+    )
+    df["atr"]          = atr_ind.average_true_range()
+    df["atr_sl_long"]  = df["close"] - 1.5 * df["atr"]   # 做多止损线（价格下方）
+    df["atr_sl_short"] = df["close"] + 1.5 * df["atr"]   # 做空止损线（价格上方）
+
     return df
 
 
@@ -519,6 +537,36 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     rd.update({"score": score, "max_score": max_score, "overall": overall,
                "overall_color": oc, "action": action,
                "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
+
+    # ── ATR 风险管理（不参与评分，仅展示）────────────────
+    _atr_val = df["atr"].iloc[-1]
+    if pd.isna(_atr_val):
+        _atr_val = 0.0
+    atr_now      = float(_atr_val)
+    atr_sl_long  = float(df["atr_sl_long"].iloc[-1])
+    atr_sl_short = float(df["atr_sl_short"].iloc[-1])
+    atr_pct      = atr_now / price * 100 if price else 0
+    rd["atr"] = {
+        "val":               round(atr_now, 4),
+        "pct":               round(atr_pct, 2),
+        "sl_long":           round(atr_sl_long, 4),
+        "sl_short":          round(atr_sl_short, 4),
+        "sl_long_dist_pct":  round((price - atr_sl_long)  / price * 100, 2) if price else 0,
+        "sl_short_dist_pct": round((atr_sl_short - price) / price * 100, 2) if price else 0,
+    }
+
+    # ── VWAP 快照（供分析面板展示）────────────────────────
+    _vwap_val = df["vwap"].iloc[-1]
+    if not pd.isna(_vwap_val):
+        vwap_val = float(_vwap_val)
+        vwap_diff_pct = (price - vwap_val) / vwap_val * 100
+        rd["vwap"] = {
+            "val":      round(vwap_val, 4),
+            "diff_pct": round(vwap_diff_pct, 2),
+            "above":    price >= vwap_val,
+        }
+    else:
+        rd["vwap"] = None
 
     return score, "\n".join(lines), rd
 
