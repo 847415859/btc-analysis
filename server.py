@@ -10,9 +10,11 @@ import sys
 import io
 import math
 import time
+import json
 import socket
 import threading
 import contextlib
+import collections
 from datetime import datetime, timedelta
 
 # ── Windows 中文主机名 GBK 编码补丁 ──────────────────────
@@ -559,13 +561,12 @@ def _analyze_oi(oi_history: list) -> dict:
 
 def _cluster_liquidations(orders: list, bucket_size: float = 500.0) -> list:
     """将强平订单按价格分桶，返回 Top-5 清算密集区"""
-    from collections import defaultdict
-    buckets = defaultdict(lambda: {"qty": 0.0, "count": 0, "long_qty": 0.0, "short_qty": 0.0})
+    buckets = collections.defaultdict(lambda: {"qty": 0.0, "count": 0, "long_qty": 0.0, "short_qty": 0.0})
     for o in orders:
         try:
-            price = float(o.get("averagePrice") or o.get("price", 0))
-            qty   = float(o.get("executedQty", 0))
-            side  = o.get("side", "")
+            price = float(o.get("averagePrice") or o.get("ap") or o.get("price", 0))
+            qty   = float(o.get("executedQty") or o.get("z") or o.get("q", 0))
+            side  = o.get("side") or o.get("S", "")
             key   = round(price / bucket_size) * bucket_size
             buckets[key]["qty"]   += qty
             buckets[key]["count"] += 1
@@ -585,6 +586,219 @@ def _cluster_liquidations(orders: list, bucket_size: float = 500.0) -> list:
          "dominant":  "多头清算" if b["long_qty"] >= b["short_qty"] else "空头清算"}
         for price, b in sorted_b
     ]
+
+
+# ─────────────────────────────────────────────
+# 清算 WebSocket 累积器
+# ─────────────────────────────────────────────
+
+# 存储结构: {symbol: deque of {price, qty, side, ts}}
+# 保留最近 48 小时内的清算记录
+_LIQ_WINDOW_HOURS = 48
+_liq_store: dict = {s: collections.deque(maxlen=50_000) for s in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]}
+_liq_lock  = threading.Lock()
+_liq_ws_running = False
+
+
+def _liq_ws_worker():
+    """后台线程：订阅 Binance 全市场强平推流，累积到本地 _liq_store。
+    自动重连，异常后等待 5s 重试。
+    """
+    global _liq_ws_running
+    _liq_ws_running = True
+
+    # 懒加载 websocket-client，避免强依赖
+    try:
+        import websocket as _ws_lib
+    except ImportError:
+        print("[清算WS] 未安装 websocket-client，请运行: pip install websocket-client")
+        print("[清算WS] 清算密集区将使用 OI 估算方案代替")
+        _liq_ws_running = False
+        return
+
+    url = "wss://fstream.binance.com/ws/!forceOrder@arr"
+    TRACKED = set(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
+
+    def on_message(ws, raw):
+        try:
+            msg = json.loads(raw)
+            # 支持单条 {"e":"forceOrder",...} 或数组
+            events = msg if isinstance(msg, list) else [msg]
+            now_ts = time.time()
+            cutoff  = now_ts - _LIQ_WINDOW_HOURS * 3600
+
+            with _liq_lock:
+                for ev in events:
+                    o = ev.get("o") or ev  # 嵌套格式 {"e":"forceOrder","o":{...}}
+                    sym  = o.get("s", "")
+                    if sym not in TRACKED:
+                        continue
+                    try:
+                        price = float(o.get("ap") or o.get("p", 0))   # 成交均价优先
+                        qty   = float(o.get("z") or o.get("q", 0))    # 已成交量
+                        side  = o.get("S", "")                         # BUY/SELL
+                        ts    = int(o.get("T", now_ts * 1000)) / 1000
+                        if price <= 0 or qty <= 0:
+                            continue
+                        # 修剪过期数据（每次写入时顺便淘汰头部过期项）
+                        dq = _liq_store[sym]
+                        while dq and dq[0]["ts"] < cutoff:
+                            dq.popleft()
+                        dq.append({"price": price, "qty": qty, "side": side, "ts": ts})
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[清算WS] 消息解析异常: {e}")
+
+    def on_error(ws, err):
+        print(f"[清算WS] 错误: {err}")
+
+    def on_close(ws, code, msg):
+        print(f"[清算WS] 连接断开 ({code}), 5s 后重连...")
+
+    def on_open(ws):
+        print("[清算WS] 已连接 Binance 全市场强平推流")
+
+    while True:
+        try:
+            ws = _ws_lib.WebSocketApp(
+                url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:
+            print(f"[清算WS] 连接异常: {e}")
+        time.sleep(5)
+
+
+def get_liq_clusters(symbol: str, hours: int = 24, top_n: int = 7) -> list:
+    """
+    从本地累积的清算数据中提取密集区。
+    hours: 只看最近 N 小时的清算
+    top_n: 返回 Top N 价格区间
+    返回: [{"price", "qty", "count", "long_qty", "short_qty", "dominant", "source"}, ...]
+    """
+    cutoff = time.time() - hours * 3600
+    with _liq_lock:
+        records = [r for r in _liq_store.get(symbol, []) if r["ts"] >= cutoff]
+
+    if not records:
+        return []
+
+    # 动态档位：按价格量级自动选 bucket_size
+    prices = [r["price"] for r in records]
+    avg_price = sum(prices) / len(prices)
+    if   avg_price > 50_000: bucket = 500.0
+    elif avg_price > 10_000: bucket = 200.0
+    elif avg_price >  1_000: bucket = 20.0
+    elif avg_price >    100: bucket = 2.0
+    else:                    bucket = 0.5
+
+    buckets = collections.defaultdict(lambda: {"qty": 0.0, "count": 0, "long_qty": 0.0, "short_qty": 0.0})
+    for r in records:
+        key = round(r["price"] / bucket) * bucket
+        buckets[key]["qty"]   += r["qty"]
+        buckets[key]["count"] += 1
+        if r["side"] == "SELL":
+            buckets[key]["long_qty"]  += r["qty"]   # SELL 方向 = 多头被清算
+        else:
+            buckets[key]["short_qty"] += r["qty"]   # BUY  方向 = 空头被清算
+
+    sorted_b = sorted(buckets.items(), key=lambda x: x[1]["qty"], reverse=True)[:top_n]
+    return [
+        {"price":     p,
+         "qty":       round(b["qty"], 4),
+         "count":     b["count"],
+         "long_qty":  round(b["long_qty"], 4),
+         "short_qty": round(b["short_qty"], 4),
+         "dominant":  "多头清算" if b["long_qty"] >= b["short_qty"] else "空头清算",
+         "source":    "websocket"}
+        for p, b in sorted_b
+    ]
+
+
+def estimate_liq_clusters_from_sr(symbol: str, tf_data: dict) -> list:
+    """
+    方案③：当 WebSocket 数据不足时，用 OI + S/R + ATR 估算潜在清算区。
+
+    逻辑：
+    - 多头清算区 = 关键支撑位下方 1~1.5× ATR（多头密集止损/强平区）
+    - 空头清算区 = 关键阻力位上方 1~1.5× ATR（空头密集止损/强平区）
+    """
+    results = []
+    try:
+        # 优先用 1h 周期的数据（平衡精度和稳定性）
+        tf = tf_data.get("1h") or tf_data.get("4h") or {}
+        rd = tf.get("rd", {})
+        atr_info = rd.get("atr", {})
+        atr_val  = atr_info.get("val", 0)
+        if not atr_val:
+            return []
+
+        current_price = rd.get("price", 0)
+        if not current_price:
+            return []
+
+        supports    = tf.get("supports", [])
+        resistances = tf.get("resistances", [])
+
+        # 多头清算区：支撑位下方 1.0~1.5 ATR（多头止损密集）
+        for sup in supports[:3]:
+            sup_price = sup.get("price", 0)
+            if not sup_price:
+                continue
+            liq_price = round(sup_price - 1.2 * atr_val, 2)
+            dist_pct  = round((current_price - liq_price) / current_price * 100, 2)
+            results.append({
+                "price":     liq_price,
+                "qty":       0,
+                "count":     0,
+                "long_qty":  0,
+                "short_qty": 0,
+                "dominant":  "多头清算(估算)",
+                "source":    "estimated",
+                "basis":     f"支撑 ${sup_price:,.0f} 下方 1.2×ATR",
+                "dist_pct":  dist_pct,
+            })
+
+        # 空头清算区：阻力位上方 1.0~1.5 ATR（空头止损密集）
+        for res in resistances[:3]:
+            res_price = res.get("price", 0)
+            if not res_price:
+                continue
+            liq_price = round(res_price + 1.2 * atr_val, 2)
+            dist_pct  = round((liq_price - current_price) / current_price * 100, 2)
+            results.append({
+                "price":     liq_price,
+                "qty":       0,
+                "count":     0,
+                "long_qty":  0,
+                "short_qty": 0,
+                "dominant":  "空头清算(估算)",
+                "source":    "estimated",
+                "basis":     f"阻力 ${res_price:,.0f} 上方 1.2×ATR",
+                "dist_pct":  dist_pct,
+            })
+
+    except Exception as e:
+        print(f"[清算估算] {symbol} 异常: {e}")
+
+    return results
+
+
+def get_liq_stats(symbol: str) -> dict:
+    """返回 WebSocket 累积器的统计信息（供前端状态展示）"""
+    with _liq_lock:
+        dq = _liq_store.get(symbol, collections.deque())
+        total = len(dq)
+        if total == 0:
+            return {"total": 0, "hours_covered": 0, "ws_running": _liq_ws_running}
+        oldest = dq[0]["ts"]
+        hours  = round((time.time() - oldest) / 3600, 1)
+    return {"total": total, "hours_covered": hours, "ws_running": _liq_ws_running}
 
 
 def _analyze_funding(rate_pct: float, history: list) -> dict:
@@ -762,20 +976,56 @@ def funding_data():
     if result["oi_history"]:
         result["oi_analysis"] = _analyze_oi(result["oi_history"])
 
-    # ── 近期清算密集区（最近 1000 笔强平）────────────────
-    try:
-        liq_r = req.get(
-            "https://fapi.binance.com/fapi/v1/allForceOrders",
-            params={"symbol": symbol, "limit": 1000},
-            timeout=8,
-        )
-        liq_list = liq_r.json()
-        if isinstance(liq_list, list):
-            result["liquidation_clusters"] = _cluster_liquidations(liq_list)
-    except Exception:
-        pass
+    # ── 清算密集区（双源：WebSocket 实时累积 + OI估算兜底）────────────
+    ws_clusters = get_liq_clusters(symbol, hours=24, top_n=7)
+    liq_stats   = get_liq_stats(symbol)
+
+    if ws_clusters:
+        # WebSocket 已积累到足够数据（≥10条记录）
+        result["liquidation_clusters"] = ws_clusters
+        result["liq_source"]           = "websocket"
+        result["liq_stats"]            = liq_stats
+    else:
+        # WebSocket 数据不足（刚启动/断线），用 OI+S/R 估算兜底
+        with _lock:
+            tf_data = _cache.get(symbol, {}).get("timeframes", {})
+        estimated = estimate_liq_clusters_from_sr(symbol, tf_data)
+        result["liquidation_clusters"] = estimated
+        result["liq_source"]           = "estimated"
+        result["liq_stats"]            = liq_stats
 
     return jsonify(result)
+
+
+@app.route("/api/liquidations")
+def liquidations():
+    """清算密集区独立端点（支持自定义时间窗口）"""
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    hours  = int(request.args.get("hours", 24))
+    top_n  = int(request.args.get("top", 7))
+
+    if symbol not in _cache:
+        return jsonify({"error": "Invalid symbol"}), 400
+
+    ws_clusters = get_liq_clusters(symbol, hours=hours, top_n=top_n)
+    liq_stats   = get_liq_stats(symbol)
+
+    if ws_clusters:
+        source   = "websocket"
+        clusters = ws_clusters
+    else:
+        with _lock:
+            tf_data = _cache.get(symbol, {}).get("timeframes", {})
+        clusters = estimate_liq_clusters_from_sr(symbol, tf_data)
+        source   = "estimated"
+
+    return jsonify({
+        "symbol":   symbol,
+        "source":   source,
+        "hours":    hours,
+        "stats":    liq_stats,
+        "clusters": clusters,
+    })
 
 
 # ─────────────────────────────────────────────
@@ -785,6 +1035,10 @@ def funding_data():
 if __name__ == "__main__":
     t = threading.Thread(target=analysis_worker, daemon=True)
     t.start()
+
+    # 启动清算 WebSocket 累积线程
+    liq_ws_thread = threading.Thread(target=_liq_ws_worker, daemon=True, name="LiquidationWS")
+    liq_ws_thread.start()
 
     print("=" * 50)
     print("  多币种实时分析服务器")

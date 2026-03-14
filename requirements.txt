@@ -4,3 +4,4 @@ numpy
 plotly
 ta
 flask
+websocket-client
