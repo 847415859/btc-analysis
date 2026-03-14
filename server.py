@@ -34,7 +34,7 @@ from flask.json import JSONEncoder
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from btc_analysis import (
-    fetch_data, calculate_indicators,
+    fetch_data, fetch_data_extended, calculate_indicators,
     find_support_resistance, calculate_fibonacci,
     generate_report, TIMEFRAMES
 )
@@ -186,13 +186,31 @@ def fetch_ob_walls(symbol: str, depth_limit: int = 1000) -> list:
     return walls
 
 
-def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb, ob_walls=None):
+def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
+                  ob_walls=None, liq_clusters=None):
     """分析单个周期，返回 {rd, candles, supports, resistances, fib}"""
+    # ── 主数据（500根，用于指标计算、图表、S/R）──────────
     df = fetch_data(symbol=symbol, interval=interval, limit=limit)
     if df.empty:
         return None
-
     df = calculate_indicators(df)
+
+    # ── 回测专用扩展历史数据（1500根，提升样本量）──────────
+    # 日线/周线本身数据量足够且拉取慢，直接复用 df；短周期单独拉
+    BT_TOTAL = {
+        "15m": 1500, "30m": 1500, "1h": 1500,
+        "2h":  1200, "4h":  1200, "8h": 1000,
+        "1d":  800,  "1w":  400,
+    }
+    bt_total = BT_TOTAL.get(interval, 1500)
+    if bt_total > limit:
+        df_bt = fetch_data_extended(symbol=symbol, interval=interval, total=bt_total)
+        if df_bt.empty:
+            df_bt = df
+        else:
+            df_bt = calculate_indicators(df_bt)
+    else:
+        df_bt = df
 
     # 构建当前时间框架的 OB 层位（乘以 TF 相关性权重）
     ob_tf_factor = _OB_TF_WEIGHTS.get(interval, 0.0)
@@ -201,17 +219,35 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
         for ob_price, ob_weight, ob_side in ob_walls:
             ob_levels.append((ob_price, round(ob_weight * ob_tf_factor, 2), ob_side))
 
+    # 清算区与时间框架相关性权重：短周期（15m/1h）直接参考，长周期（日线/周线）弱化
+    # 日内清算区对短周期 S/R 有强指引，对周线参考意义小
+    _LIQ_TF_WEIGHTS = {
+        "15m": 1.0, "30m": 1.0, "1h": 1.0,
+        "2h":  0.8, "4h":  0.8, "8h": 0.5,
+        "1d":  0.3, "1w":  0.0,
+    }
+    liq_tf_factor = _LIQ_TF_WEIGHTS.get(interval, 0.0)
+    liq_levels_tf = []
+    if liq_clusters and liq_tf_factor > 0.0:
+        for lc in liq_clusters:
+            # 复制一份并按 TF 权重缩放 qty（用于 S/R 聚类权重）
+            liq_levels_tf.append({**lc, "_tf_weight": liq_tf_factor})
+
     supports, resistances = find_support_resistance(
         df, lookback=sr_lb, pivot_n=sr_pn,
-        cluster_pct=sr_cluster_pct, ob_levels=ob_levels
+        cluster_pct=sr_cluster_pct, ob_levels=ob_levels,
+        liq_levels=liq_levels_tf if liq_levels_tf else None
     )
     fib_levels, fib_high, fib_low = calculate_fibonacci(df, lookback=fib_lb)
 
     # 静默调用 generate_report（不打印到控制台）
+    # df_bt 传入用于回测（历史更长），df 用于指标/价格引用
     with contextlib.redirect_stdout(io.StringIO()):
         _, _, rd = generate_report(
             df, supports, resistances, fib_levels,
-            symbol=symbol, tf_label=label, verbose=False
+            symbol=symbol, tf_label=label, verbose=False,
+            liq_clusters=liq_clusters if liq_clusters else None,
+            df_backtest=df_bt,
         )
 
     # 准备图表用的 K 线数据（带指标值）
@@ -237,13 +273,17 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
     return {
         "rd": rd,
         "candles": candles,
-        "supports":    [{"price": s[0],
+        "supports":    [{"price":    s[0],
                          "dist_pct": round((price - s[0]) / price * 100, 2),
-                         "source":   s[2] if len(s) > 2 else "pivot"}
+                         "score":    round(s[1], 2),
+                         "source":   s[2] if len(s) > 2 else "pivot",
+                         "reason":   s[3] if len(s) > 3 else ""}
                         for s in supports],
-        "resistances": [{"price": r[0],
+        "resistances": [{"price":    r[0],
                          "dist_pct": round((r[0] - price) / price * 100, 2),
-                         "source":   r[2] if len(r) > 2 else "pivot"}
+                         "score":    round(r[1], 2),
+                         "source":   r[2] if len(r) > 2 else "pivot",
+                         "reason":   r[3] if len(r) > 3 else ""}
                         for r in resistances],
         "fib": [{"label": k, "price": v,
                  "dist_pct": round((v - price) / price * 100, 2),
@@ -282,6 +322,15 @@ def _analyze_symbol(symbol: str) -> None:
         if ob_walls:
             print(f"[服务器] {symbol} OB 挂单墙: {len(ob_walls)} 个价格层")
 
+    # 拉取最近 24h 清算数据（先取 WS 真实数据，不足则用估算兜底）
+    liq_clusters_now = get_liq_clusters(symbol, hours=24, top_n=10)
+    if not liq_clusters_now:
+        with _lock:
+            tf_snap = _cache.get(symbol, {}).get("timeframes", {})
+        liq_clusters_now = estimate_liq_clusters_from_sr(symbol, tf_snap)
+    if liq_clusters_now:
+        print(f"[服务器] {symbol} 清算密集区: {len(liq_clusters_now)} 个 (来源: {liq_clusters_now[0].get('source','?')})")
+
     for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
         cached = cur_tf.get(interval, {})
         age    = now_ts - cached.get("_fetched_at", 0)
@@ -297,7 +346,7 @@ def _analyze_symbol(symbol: str) -> None:
         try:
             result = run_single_tf(symbol, interval, limit, label,
                                    chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
-                                   ob_walls=ob_walls)
+                                   ob_walls=ob_walls, liq_clusters=liq_clusters_now)
             if result:
                 result["_fetched_at"] = now_ts
                 new_tf[interval] = result

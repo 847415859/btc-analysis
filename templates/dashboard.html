@@ -480,16 +480,20 @@ const fmtN  = n => n == null ? '--' : Number(n).toLocaleString('en-US',{minimumF
 const sc    = s => s > 0 ? 'bull' : (s < 0 ? 'bear' : 'neutral');
 const noNaN = arr => arr.map(v => (v == null || isNaN(v)) ? null : v);
 
-// S/R 来源徽章：📋 挂单墙 | 📊 成交量节点 | 空=纯分形（不显示，保持简洁）
+// S/R 来源徽章：📋 挂单墙 | 📊 成交量节点 | 🔴/🟢 清算区 | 空=纯分形
 function srBadge(source) {
   if (!source) return '';
   const parts = source.split('+');
-  const hasOB  = parts.some(p => p.startsWith('orderbook'));
-  const hasVol = parts.includes('volume');
-  if (hasOB && hasVol) return '<span class="sr-badge">📋+📊</span>';
-  if (hasOB)           return '<span class="sr-badge">📋 挂单墙</span>';
-  if (hasVol)          return '<span class="sr-badge">📊</span>';
-  return '';
+  const hasOB       = parts.some(p => p.startsWith('orderbook'));
+  const hasVol      = parts.includes('volume');
+  const hasLiqLong  = parts.includes('liq_long');
+  const hasLiqShort = parts.includes('liq_short');
+  let badges = [];
+  if (hasOB)       badges.push('<span class="sr-badge">📋 挂单墙</span>');
+  if (hasVol)      badges.push('<span class="sr-badge">📊</span>');
+  if (hasLiqLong)  badges.push('<span class="sr-badge" style="background:rgba(239,83,80,0.18);color:#ef5350">🔴 多头清算</span>');
+  if (hasLiqShort) badges.push('<span class="sr-badge" style="background:rgba(38,166,154,0.18);color:#26a69a">🟢 空头清算</span>');
+  return badges.join('');
 }
 
 function setEls(ids, val) { ids.forEach(([id, v]) => { const el = document.getElementById(id); if(el) el.textContent = v || val; }); }
@@ -1386,23 +1390,83 @@ function buildFundingCard(funding, rd = null) {
 
   // ── 清算密集区 ─────────────────────────────────────
   const liqClusters = funding.liquidation_clusters || [];
+  const liqSource   = funding.liq_source || 'none';
+  const liqStats    = funding.liq_stats  || {};
+  // 当前周期 rd 中的清算评分（若存在）
+  const liqRd       = rd?.liq || {};
+  const liqScore    = liqRd.score ?? null;
+  const liqSignals  = liqRd.signals || [];
+  const slLongOpt   = liqRd.sl_long_opt;
+  const slShortOpt  = liqRd.sl_short_opt;
+
   let liqHTML = '';
   if (liqClusters.length > 0) {
     const currentPrice = rd?.price;
+
+    // 数据来源标注
+    const srcLabel = liqSource === 'websocket'
+      ? `<span style="color:#26a69a;font-size:9px">● 实时WS (${liqStats.hours_covered||0}h/${liqStats.total||0}条)</span>`
+      : `<span style="color:#f9a825;font-size:9px">◐ S/R估算</span>`;
+
+    // 评分行
+    let scoreRow = '';
+    if (liqScore !== null) {
+      const sc = liqScore > 0 ? `+${liqScore}` : `${liqScore}`;
+      const scCol = liqScore > 0 ? '#26a69a' : liqScore < 0 ? '#ef5350' : '#9e9e9e';
+      scoreRow = `<div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:4px">
+        <span style="color:var(--text3)">清算区评分</span>
+        <span style="color:${scCol};font-weight:700">${sc} 分</span>
+      </div>`;
+    }
+
+    // 信号列表（只显示非止损建议类）
+    const sigRows = liqSignals
+      .filter(s => s.type !== 'sl_long_opt' && s.type !== 'sl_short_opt')
+      .map(s => {
+        const icon = s.score > 0 ? '🟢' : s.score < 0 ? '🔴' : '📌';
+        const col  = s.score > 0 ? '#26a69a' : s.score < 0 ? '#ef5350' : '#b0bec5';
+        return `<div style="font-size:10px;color:${col};padding:2px 0;line-height:1.4">${icon} ${s.text}</div>`;
+      }).join('');
+
+    // 止损建议
+    let slRow = '';
+    if (slLongOpt || slShortOpt) {
+      slRow = `<div style="margin-top:4px;padding:4px 6px;background:rgba(255,255,255,0.04);border-radius:3px;font-size:10px">
+        <span style="color:var(--text3)">📌 优化止损参考：</span>
+        ${slLongOpt  ? `<span style="color:#26a69a">多单 $${slLongOpt.toLocaleString()}</span>` : ''}
+        ${slLongOpt && slShortOpt ? ' · ' : ''}
+        ${slShortOpt ? `<span style="color:#ef5350">空单 $${slShortOpt.toLocaleString()}</span>` : ''}
+      </div>`;
+    }
+
+    // 清算密集区列表
     const rows = liqClusters.map(lc => {
-      const dist = currentPrice ? ((lc.price - currentPrice)/currentPrice*100).toFixed(2)+'%' : lc.dominant;
-      const icon = lc.dominant === '多头清算' ? '🔴' : '🟢';
-      return `<div style="display:flex;justify-content:space-between;font-size:10px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
-        <span>${icon} $${lc.price.toLocaleString()}</span>
-        <span style="color:var(--text3)">${lc.count}笔 ${lc.qty.toFixed(1)}张</span>
-        <span style="color:var(--text3)">${dist}</span>
+      const isLong = lc.dominant.includes('多头');
+      const icon   = isLong ? '🔴' : '🟢';
+      const col    = isLong ? '#ef5350' : '#26a69a';
+      const dist   = currentPrice ? ((lc.price - currentPrice)/currentPrice*100).toFixed(2) : '0.00';
+      const distStr = parseFloat(dist) >= 0 ? `+${dist}%` : `${dist}%`;
+      const qtyStr  = lc.source === 'estimated'
+        ? `<span style="color:#f9a825">估算</span>`
+        : `${lc.count}笔 ${lc.qty.toFixed(1)}张`;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span style="color:${col}">${icon} $${lc.price.toLocaleString()}</span>
+        <span style="color:var(--text3)">${qtyStr}</span>
+        <span style="color:var(--text3)">${distStr}</span>
       </div>`;
     }).join('');
+
     liqHTML = `
       <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border2)">
-        <div style="font-size:10px;color:var(--text3);margin-bottom:4px">🔥 近24h清算密集区（Top 5）</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;color:var(--text3)">🔥 清算密集区</span>
+          ${srcLabel}
+        </div>
+        ${scoreRow}
+        ${sigRows}
         ${rows}
-        <div style="font-size:9px;color:var(--text3);margin-top:3px">🔴多头被爆仓 · 🟢空头被爆仓</div>
+        ${slRow}
+        <div style="font-size:9px;color:var(--text3);margin-top:4px">🔴多头被爆 · 🟢空头被爆 · 价格磁吸 S/R 已融合</div>
       </div>`;
   }
 
@@ -1454,10 +1518,41 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
     const a = m.above ? '▲' : '▼';
     maRows += `<tr><td style="font-weight:600">${m.name}</td><td style="color:#78909c">${m.desc}</td><td>${fmt(m.val)}</td><td style="color:${c}">${a} ${m.diff_pct >= 0?'+':''}${m.diff_pct.toFixed(2)}%</td></tr>`;
   });
-  const srRows = (resistances||[]).map(r =>
-    `<tr><td style="color:var(--bear)">阻力</td><td>${fmt(r.price)}</td><td style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</td><td>${srBadge(r.source)}</td></tr>`
-  ).join('') + (supports||[]).map(s =>
-    `<tr><td style="color:var(--bull)">支撑</td><td>${fmt(s.price)}</td><td style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</td><td>${srBadge(s.source)}</td></tr>`
+  // 权重强度条（最大权重参考值 8.0）
+  function srStrengthBar(score) {
+    const pct = Math.min(100, (score / 8.0) * 100).toFixed(0);
+    const col = score >= 6 ? '#ef5350' : score >= 4 ? '#ff9800' : score >= 2.5 ? '#f9a825' : '#78909c';
+    return `<div style="display:inline-flex;align-items:center;gap:4px">
+      <div style="width:40px;height:5px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${col};border-radius:3px"></div>
+      </div>
+      <span style="font-size:9px;color:${col}">${score.toFixed(1)}</span>
+    </div>`;
+  }
+
+  // 阻力：从大到小（距当前价由近→远）
+  const resRowsSorted = [...(resistances||[])].sort((a,b) => b.price - a.price);
+  // 支撑：从大到小（距当前价由近→远）
+  const supRowsSorted = [...(supports||[])].sort((a,b) => b.price - a.price);
+
+  const srRows = resRowsSorted.map(r =>
+    `<tr>
+      <td style="color:var(--bear);white-space:nowrap">阻力</td>
+      <td style="white-space:nowrap">${fmt(r.price)}</td>
+      <td style="color:var(--bear);white-space:nowrap">+${r.dist_pct.toFixed(2)}%</td>
+      <td>${srStrengthBar(r.score||0)}</td>
+      <td>${srBadge(r.source)}</td>
+      <td style="font-size:10px;color:var(--text3);max-width:160px;line-height:1.3">${r.reason||''}</td>
+    </tr>`
+  ).join('') + supRowsSorted.map(s =>
+    `<tr>
+      <td style="color:var(--bull);white-space:nowrap">支撑</td>
+      <td style="white-space:nowrap">${fmt(s.price)}</td>
+      <td style="color:var(--bull);white-space:nowrap">-${s.dist_pct.toFixed(2)}%</td>
+      <td>${srStrengthBar(s.score||0)}</td>
+      <td>${srBadge(s.source)}</td>
+      <td style="font-size:10px;color:var(--text3);max-width:160px;line-height:1.3">${s.reason||''}</td>
+    </tr>`
   ).join('');
   const fibRows = (fib||[]).sort((a,b)=>b.price-a.price).map(f => {
     const near = f.near ? ' <span style="color:var(--neutral)">← 附近</span>' : '';
@@ -1476,6 +1571,22 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
       ${buildRegimeBadge(rd)}
       <div class="overall-box" style="border-left-color:${oc}">
         <div class="overall-text" style="color:${oc}">${rd.overall}</div>
+        ${rd.confidence_pct != null ? (() => {
+          const cp  = rd.confidence_pct;
+          const cl  = rd.confidence_level || '';
+          const cc  = cp >= 70 ? '#26a69a' : cp >= 50 ? '#f9a825' : '#ef5350';
+          const dir = rd.backtest?.signal_direction === 'long' ? '做多' : rd.backtest?.signal_direction === 'short' ? '做空' : '';
+          return `<div style="margin-top:6px;padding:5px 8px;border-radius:4px;background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:11px;color:var(--text3)">历史验证置信度 ${dir ? '('+dir+')' : ''}</span>
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:60px;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
+                <div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width .3s"></div>
+              </div>
+              <span style="font-size:12px;font-weight:700;color:${cc}">${cp}%</span>
+              <span style="font-size:10px;color:var(--text3)">${cl}</span>
+            </div>
+          </div>`;
+        })() : ''}
         <div class="score-bar">
           <span class="score-bar-label">多</span>
           <div class="score-bar-bull" style="width:${bullW.toFixed(1)}%;min-width:2px"></div>
@@ -1492,9 +1603,131 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
         <tr><td>KDJ</td><td style="color:${C(rd.kdj.score)}">${rd.kdj.score>=0?'+':''}${rd.kdj.score}</td></tr>
         <tr><td>OBV</td><td style="color:${C(rd.obv.score)}">${rd.obv.score>=0?'+':''}${rd.obv.score}</td></tr>
         <tr><td>CVD</td><td style="color:${C(rd.cvd?.score??0)}">${(rd.cvd?.score??0)>=0?'+':''}${rd.cvd?.score??0}</td></tr>
+        <tr><td>清算区</td><td style="color:${C(rd.liq?.score??0)}">${(rd.liq?.score??0)>=0?'+':''}${rd.liq?.score??0}</td></tr>
+        <tr><td>历史回测</td><td style="color:${C(rd.backtest?.score??0)}">${rd.backtest ? ((rd.backtest.score>=0?'+':'')+rd.backtest.score) : 'N/A'}</td></tr>
         <tr style="font-weight:700;border-top:1px solid #2a2e39"><td>合计</td><td style="color:${oc}">${rd.score>=0?'+':''}${rd.score} / ${rd.max_score}</td></tr>
       </table>
     </div>
+
+    ${rd.backtest ? (() => {
+      const bt = rd.backtest;
+      const hasData = bt.win_rate != null;
+      const cc = bt.confidence_pct >= 70 ? '#26a69a' : bt.confidence_pct >= 50 ? '#f9a825' : '#ef5350';
+      const sc = bt.score > 0 ? 'var(--bull)' : bt.score < 0 ? 'var(--bear)' : 'var(--neutral)';
+      const dirLabel = bt.signal_direction === 'long' ? '🟢 做多' : '🔴 做空';
+      const desc = bt.description || {};
+      if (!hasData) return `
+      <div class="card">
+        <div class="card-title">📊 历史形态验证</div>
+        <div style="font-size:11px;color:#f9a825;padding:4px 0">${bt.note||'样本不足，暂无回测数据'}</div>
+        ${desc.signal_feature ? `<div style="font-size:10px;color:var(--text3);margin-top:4px">${desc.signal_feature}</div>` : ''}
+        ${desc.direction_reason ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${desc.direction_reason}</div>` : ''}
+      </div>`;
+
+      // 多持仓周期对比表
+      const periodRows = Object.entries(bt.period_results||{})
+        .sort((a,b)=>parseInt(a[0])-parseInt(b[0]))
+        .map(([hb, pr]) => {
+          const isBest = parseInt(hb) === bt.hold_bars;
+          const ec = pr.expectancy >= 0 ? '#26a69a' : '#ef5350';
+          const wc = pr.win_rate >= 0.55 ? '#26a69a' : pr.win_rate >= 0.45 ? '#f9a825' : '#ef5350';
+          return `<tr style="${isBest ? 'background:rgba(255,255,255,0.05);' : ''}">
+            <td style="color:${isBest?'#fff':'var(--text2)'}">
+              ${isBest ? '⭐' : ''} ${hb}根
+            </td>
+            <td style="color:${wc}">${(pr.win_rate*100).toFixed(1)}%</td>
+            <td>${pr.rr_ratio.toFixed(2)}</td>
+            <td style="color:${ec}">${pr.expectancy>=0?'+':''}${pr.expectancy.toFixed(3)}%</td>
+            <td style="font-size:9px;color:var(--text3)">${pr.sl_hits}止损 ${pr.tp_hits}止盈 ${pr.timeout_exits}超时</td>
+          </tr>`;
+        }).join('');
+
+      // 风险提示
+      const riskHTML = (desc.risk_notes||[]).map(r =>
+        `<div style="font-size:10px;color:#ff9800;padding:1px 0">⚠️ ${r}</div>`
+      ).join('');
+
+      return `
+      <div class="card">
+        <div class="card-title">📊 历史形态验证</div>
+
+        <!-- 置信度头部 -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div>
+            <span style="font-size:14px;font-weight:700;color:${cc}">${bt.confidence_pct}%</span>
+            <span style="font-size:11px;color:var(--text3);margin-left:4px">置信度 · ${bt.confidence_level}</span>
+          </div>
+          <span style="font-size:11px;color:var(--text2)">${dirLabel} · ${bt.sample_count}样本 · 阈值${(bt.similarity_thresh*100).toFixed(0)}%</span>
+        </div>
+        <div style="height:5px;background:rgba(255,255,255,0.08);border-radius:3px;margin-bottom:10px;overflow:hidden">
+          <div style="width:${bt.confidence_pct}%;height:100%;background:${cc};border-radius:3px"></div>
+        </div>
+
+        <!-- 形态描述 -->
+        ${desc.signal_feature ? `
+        <div style="padding:6px 8px;border-radius:4px;background:rgba(255,255,255,0.03);margin-bottom:8px">
+          <div style="font-size:10px;color:var(--text3);line-height:1.5">${desc.signal_feature}</div>
+          <div style="font-size:10px;color:#78909c;margin-top:2px;line-height:1.5">${desc.direction_reason||''}</div>
+        </div>` : ''}
+
+        <!-- 核心指标 2×2 -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:8px">
+          <div style="background:rgba(38,166,154,0.08);border-radius:4px;padding:7px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:#26a69a">${(bt.win_rate*100).toFixed(1)}%</div>
+            <div style="font-size:9px;color:var(--text3)">历史胜率</div>
+          </div>
+          <div style="background:rgba(255,152,0,0.08);border-radius:4px;padding:7px;text-align:center">
+            <div style="font-size:20px;font-weight:700;color:#ff9800">${bt.rr_ratio.toFixed(2)}</div>
+            <div style="font-size:9px;color:var(--text3)">盈亏比 R:R</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.04);border-radius:4px;padding:7px;text-align:center">
+            <div style="font-size:14px;font-weight:700;color:#26a69a">+${bt.avg_win_pct.toFixed(3)}%</div>
+            <div style="font-size:9px;color:var(--text3)">平均盈利</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.04);border-radius:4px;padding:7px;text-align:center">
+            <div style="font-size:14px;font-weight:700;color:#ef5350">${bt.avg_loss_pct.toFixed(3)}%</div>
+            <div style="font-size:9px;color:var(--text3)">平均亏损</div>
+          </div>
+        </div>
+
+        <!-- 期望值大字 -->
+        <div style="padding:7px 10px;border-radius:4px;background:rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:11px;color:var(--text3)">期望值 Expectancy</span>
+          <span style="font-size:15px;font-weight:700;color:${bt.expectancy>=0?'#26a69a':'#ef5350'}">${bt.expectancy>=0?'+':''}${bt.expectancy.toFixed(3)}% / 笔</span>
+        </div>
+
+        <!-- 多持仓周期对比 -->
+        ${periodRows ? `
+        <div style="margin-bottom:8px">
+          <div style="font-size:10px;color:var(--text3);margin-bottom:4px">📅 多持仓周期对比（⭐最优）</div>
+          <table style="font-size:10px">
+            <tr style="color:var(--text3)"><th>持仓</th><th>胜率</th><th>盈亏比</th><th>期望</th><th>出场分布</th></tr>
+            ${periodRows}
+          </table>
+        </div>` : ''}
+
+        <!-- 一致性 + 出场分布 -->
+        ${desc.consistency ? `<div style="font-size:10px;color:var(--text3);margin-bottom:3px">📐 ${desc.consistency}</div>` : ''}
+        ${desc.exit_distribution ? `<div style="font-size:10px;color:var(--text3);margin-bottom:6px">🚪 ${desc.exit_distribution}</div>` : ''}
+
+        <!-- 风险提示 -->
+        ${riskHTML}
+
+        <!-- 结论 -->
+        ${desc.backtest_result ? `
+        <div style="margin-top:6px;padding:5px 8px;border-radius:4px;background:${bt.expectancy>=0?'rgba(38,166,154,0.08)':'rgba(239,83,80,0.08)'};font-size:11px;color:var(--text2);line-height:1.5">
+          📋 ${desc.backtest_result}
+        </div>` : ''}
+
+        <!-- 参数说明 -->
+        <div style="margin-top:5px;padding:3px 8px;font-size:9px;color:var(--text3)">
+          止损 ${bt.atr_sl_mult}×ATR · 止盈 ${bt.atr_tp_mult}×ATR · 一致性 ${((bt.consistency||0)*100).toFixed(0)}% · 评分 <span style="color:${sc};font-weight:700">${bt.score>=0?'+':''}${bt.score}</span>
+        </div>
+        <div style="margin-top:3px;font-size:9px;color:var(--text3);opacity:0.6">
+          ⚠️ 基于历史相似形态统计，不构成投资建议。过去表现不代表未来收益。
+        </div>
+      </div>`;
+    })() : ''}
     <div class="card">
       <div class="card-title">均线系统</div>
       <table><tr><th>均线</th><th>含义</th><th>价格</th><th>偏离</th></tr>${maRows}</table>
@@ -1569,7 +1802,10 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
     ${buildFundingCard(funding, rd)}
     <div class="card">
       <div class="card-title">支撑 / 阻力位</div>
-      <table><tr><th>类型</th><th>价格</th><th>距当前</th><th>来源</th></tr>${srRows}</table>
+      <table style="table-layout:auto">
+        <tr><th>类型</th><th>价格</th><th>距当前</th><th>强度</th><th>来源</th><th>选取原因</th></tr>
+        ${srRows}
+      </table>
     </div>
     <div class="card">
       <div class="card-title">Fibonacci 回调位</div>
@@ -1611,10 +1847,27 @@ function updateMobileSignals() {
   const cur = analysisData[currentTf];
   let srHTML = '';
   if (cur) {
+    const resS = [...(cur.resistances||[])].sort((a,b)=>b.price-a.price);
+    const supS = [...(cur.supports||[])].sort((a,b)=>b.price-a.price);
+    const mkRow = (item, type) => {
+      const col    = type === 'res' ? 'var(--bear)' : 'var(--bull)';
+      const label  = type === 'res' ? '阻力' : '支撑';
+      const distStr = type === 'res' ? `+${item.dist_pct.toFixed(2)}%` : `-${item.dist_pct.toFixed(2)}%`;
+      const scoreBar = `<div style="width:30px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;overflow:hidden;display:inline-block;vertical-align:middle;margin-left:4px"><div style="width:${Math.min(100,(item.score||0)/8*100).toFixed(0)}%;height:100%;background:${col}"></div></div>`;
+      return `<div class="sr-row" style="flex-direction:column;align-items:flex-start;padding:4px 0">
+        <div style="display:flex;justify-content:space-between;width:100%">
+          <span style="color:${col}">${label}</span>
+          <span>${fmt(item.price)}</span>
+          <span style="color:${col}">${distStr}</span>
+          <span>${scoreBar} ${srBadge(item.source)}</span>
+        </div>
+        ${item.reason ? `<div style="font-size:10px;color:var(--text3);margin-top:2px;padding-left:4px">${item.reason}</div>` : ''}
+      </div>`;
+    };
     srHTML = `<div class="sr-section">
       <h3>当前周期 [${TF_LABELS_FULL[currentTf]||currentTf}] 支撑/阻力</h3>
-      ${(cur.resistances||[]).map(r=>`<div class="sr-row"><span style="color:var(--bear)">阻力</span><span>${fmt(r.price)}</span><span style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</span>${srBadge(r.source)}</div>`).join('')}
-      ${(cur.supports||[]).map(s=>`<div class="sr-row"><span style="color:var(--bull)">支撑</span><span>${fmt(s.price)}</span><span style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</span>${srBadge(s.source)}</div>`).join('')}
+      ${resS.map(r=>mkRow(r,'res')).join('')}
+      ${supS.map(s=>mkRow(s,'sup')).join('')}
     </div>`;
   }
   panel.innerHTML = matrixHTML + gridHTML + srHTML;

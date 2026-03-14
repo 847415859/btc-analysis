@@ -87,6 +87,73 @@ def fetch_data(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) 
 
 
 # ─────────────────────────────────────────────
+# A-2. 扩展历史数据获取（回测专用，分批拼接）
+# ─────────────────────────────────────────────
+
+def fetch_data_extended(symbol: str = "BTCUSDT", interval: str = "1h",
+                        total: int = 1500) -> pd.DataFrame:
+    """
+    分批拉取历史 K 线，突破单次 500 根上限，最多拉取 total 根。
+    通过 endTime 参数向前滚动，逆向拼接后按时间正序返回。
+    适用于回测引擎，不用于实时展示。
+    """
+    url      = "https://api.binance.com/api/v3/klines"
+    per_req  = 500          # Binance 单次上限
+    pages    = max(1, -(-total // per_req))   # 向上取整
+    frames   = []
+    end_ms   = None         # None = 当前时间
+
+    for page in range(pages):
+        params = {"symbol": symbol, "interval": interval, "limit": per_req}
+        if end_ms is not None:
+            params["endTime"] = end_ms
+
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, params=params, timeout=20)
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get("Retry-After", 60))
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
+            except requests.RequestException:
+                time.sleep(2)
+        else:
+            break
+
+        raw = resp.json()
+        if not raw:
+            break
+
+        df_page = pd.DataFrame(raw, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
+        ])
+        df_page["date"] = pd.to_datetime(df_page["open_time"], unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df_page[col] = df_page[col].astype(float)
+        df_page["taker_buy_base"] = df_page["taker_buy_base"].astype(float)
+        df_page = df_page[["date", "open_time", "open", "high", "low",
+                            "close", "volume", "taker_buy_base"]]
+        frames.append(df_page)
+
+        # 下一页的截止时间 = 本页最早 K 线开盘时间 - 1ms
+        end_ms = int(df_page["open_time"].iloc[0]) - 1
+        time.sleep(0.15)   # 避免过快触发限流
+
+    if not frames:
+        return pd.DataFrame()
+
+    df_all = pd.concat(reversed(frames), ignore_index=True)
+    df_all = df_all.drop_duplicates(subset="open_time").sort_values("date")
+    df_all = df_all[["date", "open", "high", "low", "close",
+                     "volume", "taker_buy_base"]].reset_index(drop=True)
+    return df_all.tail(total).reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────
 # B. 技术指标计算
 # ─────────────────────────────────────────────
 
@@ -184,7 +251,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 
 def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5,
-                             cluster_pct: float = 0.015, ob_levels: list = None):
+                             cluster_pct: float = 0.015, ob_levels: list = None,
+                             liq_levels: list = None):
     recent = df.tail(lookback).copy()
     current_price = df["close"].iloc[-1]
 
@@ -236,7 +304,29 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             if 0.8 * current_price <= ob_price <= 1.2 * current_price:
                 raw_levels.append((ob_price, ob_weight, ob_side))
 
-    # 4. 聚类合并（支持 3-tuple，合并来源标签）
+    # 4. 清算密集区（来自 WebSocket 累积或 OI 估算）
+    # 多头清算区 → 价格下方潜在支撑（多头止损密集，一旦触及会产生大量卖压，但也是空方目标位）
+    # 空头清算区 → 价格上方潜在阻力（空头止损密集，轧空后变为强支撑）
+    # 权重 2.5：介于订单簿(2-3)和成交量节点(2)之间，反映其真实的价格磁吸效应
+    if liq_levels:
+        for lc in liq_levels:
+            lc_price = lc.get("price", 0)
+            dominant = lc.get("dominant", "")
+            if not lc_price:
+                continue
+            # 只收录当前价格 ±15% 范围内（清算区距离太远参考意义不大）
+            if not (0.85 * current_price <= lc_price <= 1.15 * current_price):
+                continue
+            # 估算来源权重稍低（1.5），WebSocket 真实数据权重更高（2.5）
+            liq_src    = lc.get("source", "estimated")
+            liq_weight = 2.5 if liq_src == "websocket" else 1.5
+            # 来源标签：区分多头/空头清算区
+            if "多头" in dominant:
+                raw_levels.append((lc_price, liq_weight, "liq_long"))
+            elif "空头" in dominant:
+                raw_levels.append((lc_price, liq_weight, "liq_short"))
+
+    # 5. 聚类合并（支持 3-tuple，合并来源标签）
     def cluster_levels(levels_with_weight, thr=0.015):
         if not levels_with_weight:
             return []
@@ -264,13 +354,58 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
 
     consolidated = cluster_levels(raw_levels, thr=cluster_pct)
 
-    # 5. 区分支撑/阻力
-    supports    = [(p, w, src) for p, w, src in consolidated if p < current_price]
-    resistances = [(p, w, src) for p, w, src in consolidated if p > current_price]
+    # 6. 为每个聚类生成 reason 文字（解释为何选为支撑/阻力）
+    def build_reason(src: str, weight: float, price: float, cur_price: float) -> str:
+        parts  = src.split("+")
+        reason_parts = []
 
-    # 6. 排序并取前5 (按距离排序)
+        if "pivot" in parts:
+            reason_parts.append("价格分形高低点")
+        if "volume" in parts:
+            reason_parts.append("成交量密集节点（筹码集中）")
+        if any(p.startswith("orderbook_bid") for p in parts):
+            reason_parts.append("订单簿大额买单挂墙")
+        if any(p.startswith("orderbook_ask") for p in parts):
+            reason_parts.append("订单簿大额卖单挂墙")
+        if "liq_long" in parts:
+            reason_parts.append("多头清算密集区（强平踩踏风险）")
+        if "liq_short" in parts:
+            reason_parts.append("空头清算密集区（轧空加速点）")
+
+        # 多源叠加说明
+        n_sources = len(parts)
+        if n_sources >= 3:
+            confluence = "三源共振"
+        elif n_sources == 2:
+            confluence = "双源叠加"
+        else:
+            confluence = None
+
+        # 权重强度说明
+        if weight >= 6.0:
+            strength_desc = "极强"
+        elif weight >= 4.0:
+            strength_desc = "强"
+        elif weight >= 2.5:
+            strength_desc = "中等"
+        else:
+            strength_desc = "一般"
+
+        reason = "、".join(reason_parts) if reason_parts else "价格分形"
+        if confluence:
+            reason = f"{confluence}：{reason}"
+        reason += f"（强度 {strength_desc} / {weight:.1f}）"
+        return reason
+
+    # 7. 区分支撑/阻力，附带 reason
+    supports    = [(p, w, src, build_reason(src, w, p, current_price))
+                   for p, w, src in consolidated if p < current_price]
+    resistances = [(p, w, src, build_reason(src, w, p, current_price))
+                   for p, w, src in consolidated if p > current_price]
+
+    # 8. 排序并取前5：支撑从大到小，阻力从大到小（均按距离当前价由近→远）
     supports    = sorted(supports,    key=lambda x: x[0], reverse=True)[:5]
-    resistances = sorted(resistances, key=lambda x: x[0])[:5]
+    resistances = sorted(resistances, key=lambda x: x[0], reverse=True)[:5]
 
     return supports, resistances
 
@@ -427,7 +562,8 @@ def create_chart(df: pd.DataFrame, supports, resistances,
 # ─────────────────────────────────────────────
 
 def generate_report(df: pd.DataFrame, supports, resistances,
-                    fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True):
+                    fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True,
+                    liq_clusters: list = None, df_backtest: pd.DataFrame = None):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -654,25 +790,31 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     emit(f"\n【支撑 / 阻力位】{sep}")
     emit("  阻力位 (从近到远):")
     res_list = []
-    for level in sorted(resistances, key=lambda x: x[0]):
-        pr, sr_score = level[0], level[1]
-        src = level[2] if len(level) > 2 else "pivot"
-        dist = (pr - price) / price * 100
+    for level in sorted(resistances, key=lambda x: x[0], reverse=True):
+        pr       = level[0]
+        sr_score = level[1]
+        src      = level[2] if len(level) > 2 else "pivot"
+        reason   = level[3] if len(level) > 3 else src
+        dist     = (pr - price) / price * 100
         confidence = min(5.0, sr_score)
         emit(f"    ${pr:>10,.2f}  距当前 +{dist:.2f}%  强度:{confidence:.1f} ({sr_score:.1f}) [{src}]")
+        emit(f"      └─ {reason}")
         res_list.append({"price": pr, "dist_pct": dist, "score": sr_score,
-                         "stars_val": confidence, "source": src})
+                         "stars_val": confidence, "source": src, "reason": reason})
 
     emit("  支撑位 (从近到远):")
     sup_list = []
     for level in sorted(supports, key=lambda x: x[0], reverse=True):
-        ps, sr_score = level[0], level[1]
-        src = level[2] if len(level) > 2 else "pivot"
-        dist = (price - ps) / price * 100
+        ps       = level[0]
+        sr_score = level[1]
+        src      = level[2] if len(level) > 2 else "pivot"
+        reason   = level[3] if len(level) > 3 else src
+        dist     = (price - ps) / price * 100
         confidence = min(5.0, sr_score)
         emit(f"    ${ps:>10,.2f}  距当前 -{dist:.2f}%  强度:{confidence:.1f} ({sr_score:.1f}) [{src}]")
+        emit(f"      └─ {reason}")
         sup_list.append({"price": ps, "dist_pct": dist, "score": sr_score,
-                         "stars_val": confidence, "source": src})
+                         "stars_val": confidence, "source": src, "reason": reason})
 
     rd["resistances"] = res_list
     rd["supports"]    = sup_list
@@ -699,29 +841,136 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         "atr_pct_rank": round(atr_pct_rank, 2),
     }
 
-    # ── 综合信号 ──
-    max_score = 18
-    emit(f"\n{'═'*60}")
-    if score >= 5:   
-        overall = f"偏多头  (得分: {score:+d}/{max_score})"
-        oc = "#26a69a"
-        action = "做多 / 买入"
-    elif score <= -5: 
-        overall = f"偏空头  (得分: {score:+d}/{max_score})"
-        oc = "#ef5350"
-        action = "做空 / 卖出"
-    else:            
-        overall = f"中性震荡  (得分: {score:+d}/{max_score})"
-        oc = "#f9a825"
-        action = "观望 / 高抛低吸"
+    # ── 清算密集区分析（参与评分）────────────────────────────────────
+    liq_score   = 0
+    liq_signals = []
+    liq_out     = []
+    rd["liq"] = {"score": 0, "signals": [], "clusters": [], "source": "none"}
 
-    emit(f"  综合信号: {overall}")
-    emit(f"  建议操作: {action}")
-    emit(f"  多空强度: {'█'*max(0,score)}{'░'*max(0,-score)}")
-    emit(f"{'═'*60}\n")
-    rd.update({"score": score, "max_score": max_score, "overall": overall,
-               "overall_color": oc, "action": action,
-               "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
+    if liq_clusters:
+        atr_val = float(df["atr"].iloc[-1]) if "atr" in df.columns and not pd.isna(df["atr"].iloc[-1]) else 0.0
+
+        # 把清算区分为多头清算区（SELL方向强平）和空头清算区（BUY方向强平）
+        long_liq  = sorted([c for c in liq_clusters if "多头" in c.get("dominant", "")],
+                           key=lambda x: x["price"], reverse=True)  # 从高到低（近的在前）
+        short_liq = sorted([c for c in liq_clusters if "空头" in c.get("dominant", "")],
+                           key=lambda x: x["price"])                 # 从低到高（近的在前）
+
+        emit(f"\n【清算密集区分析】{sep}")
+        emit(f"  当前价格: ${price:,.2f}  ATR: ${atr_val:,.2f}")
+
+        # ── 场景1：逼近多头清算区（价格下方，距离 < 1.5×ATR）→ 风险警告 -1 ──
+        # 多头止损密集在支撑位下方，价格逼近时一旦跌破会引发踩踏
+        for lc in long_liq:
+            lc_price = lc["price"]
+            if lc_price >= price:
+                continue  # 跳过价格上方的多头清算区（已穿越）
+            dist = price - lc_price
+            dist_pct = dist / price * 100
+            if atr_val > 0 and dist < 1.5 * atr_val:
+                liq_score -= 1
+                sig = f"逼近多头清算区 ${lc_price:,.0f} (距离 -{dist_pct:.2f}%, <1.5×ATR) → 踩踏风险，支撑脆弱"
+                liq_signals.append({"type": "warn_long_liq", "text": sig, "score": -1,
+                                    "price": lc_price, "dist_pct": -dist_pct})
+                emit(f"  ⚠️  {sig}")
+                break  # 只取最近一个
+
+        # ── 场景2：价格已跌破多头清算区（在其下方）→ 支撑失效 -2 ──
+        for lc in long_liq:
+            lc_price = lc["price"]
+            dist_below = lc_price - price   # 正值 = 价格在清算区下方
+            if dist_below > 0 and (atr_val == 0 or dist_below < 2.0 * atr_val):
+                liq_score -= 2
+                sig = f"已跌破多头清算区 ${lc_price:,.0f} (下方 {dist_below/price*100:.2f}%) → 多头出清，支撑失效"
+                liq_signals.append({"type": "long_liq_broken", "text": sig, "score": -2,
+                                    "price": lc_price, "dist_pct": dist_below / price * 100})
+                emit(f"  🔴  {sig}")
+                break
+
+        # ── 场景3：逼近空头清算区（价格上方，距离 < 1.5×ATR）→ 轧空动能 +1 ──
+        # 空头止损密集在阻力位上方，价格逼近时一旦突破会引发轧空加速上涨
+        for lc in short_liq:
+            lc_price = lc["price"]
+            if lc_price <= price:
+                continue
+            dist = lc_price - price
+            dist_pct = dist / price * 100
+            if atr_val > 0 and dist < 1.5 * atr_val:
+                liq_score += 1
+                sig = f"逼近空头清算区 ${lc_price:,.0f} (距离 +{dist_pct:.2f}%, <1.5×ATR) → 轧空动能，突破可加速"
+                liq_signals.append({"type": "short_liq_squeeze", "text": sig, "score": +1,
+                                    "price": lc_price, "dist_pct": dist_pct})
+                emit(f"  🟢  {sig}")
+                break
+
+        # ── 场景4：价格已突破空头清算区（在其上方）→ 突破可信 +2 ──
+        for lc in reversed(short_liq):
+            lc_price = lc["price"]
+            dist_above = price - lc_price  # 正值 = 价格在清算区上方
+            if dist_above > 0 and (atr_val == 0 or dist_above < 2.0 * atr_val):
+                liq_score += 2
+                sig = f"已突破空头清算区 ${lc_price:,.0f} (上方 {dist_above/price*100:.2f}%) → 空头出清，突破可信"
+                liq_signals.append({"type": "short_liq_broken", "text": sig, "score": +2,
+                                    "price": lc_price, "dist_pct": dist_above / price * 100})
+                emit(f"  ✅  {sig}")
+                break
+
+        # ── 场景5：止损位建议（结合最近清算区，优化 ATR 止损线）──────────
+        # 多头止损：不应设在多头清算密集区内部（会被踩踏带走），应设在其下方
+        best_long_sl = None
+        for lc in long_liq:
+            lc_price = lc["price"]
+            if lc_price < price:
+                candidate = lc_price - (atr_val * 0.3 if atr_val else lc_price * 0.003)
+                best_long_sl = round(candidate, 2)
+                sig = f"多头优化止损: ${best_long_sl:,.2f} (清算区 ${lc_price:,.0f} 下方 0.3×ATR)"
+                liq_signals.append({"type": "sl_long_opt", "text": sig, "score": 0,
+                                    "price": best_long_sl, "dist_pct": (price - best_long_sl) / price * 100})
+                emit(f"  📌  {sig}")
+                break
+
+        best_short_sl = None
+        for lc in short_liq:
+            lc_price = lc["price"]
+            if lc_price > price:
+                candidate = lc_price + (atr_val * 0.3 if atr_val else lc_price * 0.003)
+                best_short_sl = round(candidate, 2)
+                sig = f"空头优化止损: ${best_short_sl:,.2f} (清算区 ${lc_price:,.0f} 上方 0.3×ATR)"
+                liq_signals.append({"type": "sl_short_opt", "text": sig, "score": 0,
+                                    "price": best_short_sl, "dist_pct": (best_short_sl - price) / price * 100})
+                emit(f"  📌  {sig}")
+                break
+
+        if not liq_signals:
+            emit("  当前价格远离所有清算密集区，无额外信号")
+
+        # liq_score 限幅：单模块最多 ±2，避免压制其他指标
+        liq_score = max(-2, min(2, liq_score))
+        score += liq_score
+
+        liq_out = [{
+            "price":    lc["price"],
+            "qty":      lc.get("qty", 0),
+            "count":    lc.get("count", 0),
+            "long_qty": lc.get("long_qty", 0),
+            "short_qty":lc.get("short_qty", 0),
+            "dominant": lc.get("dominant", ""),
+            "source":   lc.get("source", ""),
+        } for lc in liq_clusters]
+
+        rd["liq"] = {
+            "score":    liq_score,
+            "signals":  liq_signals,
+            "clusters": liq_out,
+            "source":   liq_clusters[0].get("source", "unknown") if liq_clusters else "none",
+            "sl_long_opt":  best_long_sl,
+            "sl_short_opt": best_short_sl,
+        }
+        emit(f"  清算区综合评分: {liq_score:+d}")
+
+    # ── 中间汇总（清算区评分后，回测前）─────────────────
+    max_score = 20   # 原18 + 清算区最多 ±2；回测后再 +2
+    emit(f"\n  [中间得分] {score:+d}/{max_score}（含清算区，待回测修正）")
 
     # ── ATR 风险管理（不参与评分，仅展示）────────────────
     _atr_val = df["atr"].iloc[-1]
@@ -753,7 +1002,617 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     else:
         rd["vwap"] = None
 
+    # ── 即时回测（历史相似形态验证）────────────────────────
+    emit(f"\n【历史形态回测验证】{sep}")
+    try:
+        # 优先使用扩展历史数据（更多样本），回退到主 df
+        _df_bt = df_backtest if (df_backtest is not None and len(df_backtest) > len(df)) else df
+        current_sig = _extract_signal_state(_df_bt, len(_df_bt) - 1)
+        # hold_bars 根据时间框架自适应
+        hb_map = {"15分钟": 10, "30分钟": 8, "1小时": 6, "2小时": 5, "4小时": 4, "8小时": 3}
+        hb = hb_map.get(tf_label, 4)
+        bt = run_backtest(_df_bt, current_sig, hold_bars=hb,
+                          atr_sl_mult=1.5, atr_tp_mult=3.0,
+                          min_samples=20, similarity_thresh=0.62)
+
+        score += bt["score"]
+        max_score += 2   # 回测模块最多 ±2 分，分母同步扩大
+
+        if bt["win_rate"] is not None:
+            desc = bt.get("description", {})
+            emit(f"  {desc.get('signal_feature','')}")
+            emit(f"  {desc.get('direction_reason','')}")
+            emit(f"  样本: {bt['sample_count']} 次 (阈值{bt['similarity_thresh']:.0%})  最优持仓: {bt['hold_bars']} 根K线")
+            emit(f"  胜率: {bt['win_rate']:.1%}  盈亏比: {bt['rr_ratio']:.2f}  期望值: {bt['expectancy']:+.3f}%/笔")
+            emit(f"  均盈: +{bt['avg_win_pct']:.3f}%  均亏: {bt['avg_loss_pct']:.3f}%")
+            emit(f"  {desc.get('exit_distribution','')}")
+            if desc.get('consistency'):
+                emit(f"  {desc['consistency']}")
+            emit(f"  多周期期望: {desc.get('period_summary','')}")
+            if desc.get('risk_notes'):
+                for rn in desc['risk_notes']:
+                    emit(f"  ⚠️ {rn}")
+            emit(f"  {desc.get('backtest_result','')}")
+            emit(f"  置信度: {bt['confidence_pct']}% ({bt['confidence_level']})  一致性: {bt['consistency']:.0%}")
+            emit(f"  回测评分: {bt['score']:+d}")
+        else:
+            emit(f"  {bt.get('note', '样本不足')}")
+
+        rd["backtest"] = bt
+        # 把置信度也融入综合 rd
+        rd["confidence_pct"]   = bt["confidence_pct"]
+        rd["confidence_level"] = bt["confidence_level"]
+    except Exception as e:
+        emit(f"  回测异常: {e}")
+        rd["backtest"] = None
+        rd["confidence_pct"]   = None
+        rd["confidence_level"] = "未知"
+
+    # ── 综合信号最终更新（含回测评分后重算 overall）────────
+    if score >= 5:
+        overall = f"偏多头  (得分: {score:+d}/{max_score})"
+        oc      = "#26a69a"
+        action  = "做多 / 买入"
+    elif score <= -5:
+        overall = f"偏空头  (得分: {score:+d}/{max_score})"
+        oc      = "#ef5350"
+        action  = "做空 / 卖出"
+    else:
+        overall = f"中性震荡  (得分: {score:+d}/{max_score})"
+        oc      = "#f9a825"
+        action  = "观望 / 高抛低吸"
+
+    rd.update({"score": score, "max_score": max_score, "overall": overall,
+               "overall_color": oc, "action": action,
+               "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
+
     return score, "\n".join(lines), rd
+
+
+# ─────────────────────────────────────────────
+# F-2. 即时回测引擎
+# ─────────────────────────────────────────────
+
+def _extract_signal_state(df: pd.DataFrame, i: int) -> dict:
+    """
+    从 DataFrame 第 i 行提取 15 维信号特征向量。
+    维度越多，相似度筛选越精准，同时通过降低阈值保证样本量。
+    """
+    row = df.iloc[i]
+
+    def _v(col):
+        v = row.get(col, np.nan)
+        return float(v) if not pd.isna(v) else None
+
+    close = _v("close") or 1.0
+
+    # ── 1. RSI 分区（5级）──────────────────────────────
+    rsi = _v("rsi")
+    if rsi is None:        rsi_zone = "unknown"
+    elif rsi >= 70:        rsi_zone = "overbought"
+    elif rsi <= 30:        rsi_zone = "oversold"
+    elif rsi >= 55:        rsi_zone = "strong"
+    elif rsi <= 45:        rsi_zone = "weak"
+    else:                  rsi_zone = "neutral"
+
+    # ── 2. 均线多空位置 ─────────────────────────────────
+    ma20  = _v("ma20");  ma50 = _v("ma50");  ma200 = _v("ma200")
+    above_ma20  = bool(close > ma20)  if ma20  else None
+    above_ma50  = bool(close > ma50)  if ma50  else None
+    above_ma200 = bool(close > ma200) if ma200 else None
+
+    # ── 3. MA 短中期交叉状态（金叉/死叉/无）────────────────
+    if ma20 and ma50:
+        if   ma20 > ma50 * 1.001: ma_cross = "golden"    # MA20 > MA50 金叉区
+        elif ma20 < ma50 * 0.999: ma_cross = "death"     # MA20 < MA50 死叉区
+        else:                     ma_cross = "neutral"
+    else:
+        ma_cross = "unknown"
+
+    # ── 4. MACD 方向 + 柱状图扩缩 ──────────────────────
+    macd = _v("macd"); macd_sig = _v("macd_signal"); macd_hist = _v("macd_hist")
+    macd_bull = bool(macd > macd_sig) if (macd is not None and macd_sig is not None) else None
+    # 柱状图相对上一根
+    if i > 0 and macd_hist is not None:
+        prev_hist = df["macd_hist"].iloc[i-1]
+        if not pd.isna(prev_hist):
+            macd_expand = bool(abs(macd_hist) > abs(float(prev_hist)))
+        else:
+            macd_expand = None
+    else:
+        macd_expand = None
+
+    # ── 5. 布林带位置 + 带宽状态 ────────────────────────
+    bb_u = _v("bb_upper"); bb_l = _v("bb_lower"); bb_m = _v("bb_mid")
+    if bb_u and bb_l and bb_m:
+        if   close >= bb_u:  bb_zone = "above_upper"
+        elif close <= bb_l:  bb_zone = "below_lower"
+        elif close > bb_m:   bb_zone = "above_mid"
+        else:                bb_zone = "below_mid"
+        bb_width_pct = (bb_u - bb_l) / bb_m * 100
+        # 带宽分位：用当前窗口 50 根历史估算
+        window_bb = df["bb_upper"].iloc[max(0,i-49):i+1] - df["bb_lower"].iloc[max(0,i-49):i+1]
+        bb_mid_w  = df["bb_mid"].iloc[max(0,i-49):i+1]
+        width_ser = (window_bb / bb_mid_w.replace(0, np.nan) * 100).dropna()
+        if len(width_ser) >= 10:
+            bb_squeeze = bool(bb_width_pct <= float(width_ser.quantile(0.25)))  # 带宽压缩
+        else:
+            bb_squeeze = None
+    else:
+        bb_zone = "unknown"; bb_squeeze = None
+
+    # ── 6. KDJ 状态 ─────────────────────────────────────
+    kdj_k = _v("kdj_k"); kdj_d = _v("kdj_d")
+    if kdj_k is not None and kdj_d is not None:
+        if   kdj_k >= 80:    kdj_zone = "overbought"
+        elif kdj_k <= 20:    kdj_zone = "oversold"
+        elif kdj_k > kdj_d:  kdj_zone = "bull"
+        else:                kdj_zone = "bear"
+    else:
+        kdj_zone = "unknown"
+
+    # ── 7. OBV 趋势（20 根斜率方向）────────────────────
+    if "obv" in df.columns and i >= 20:
+        obv_now  = df["obv"].iloc[i]
+        obv_prev = df["obv"].iloc[i-20]
+        if not pd.isna(obv_now) and not pd.isna(obv_prev):
+            obv_trend = "up" if float(obv_now) > float(obv_prev) else "down"
+        else:
+            obv_trend = "unknown"
+    else:
+        obv_trend = "unknown"
+
+    # ── 8. ADX 市场机制 ─────────────────────────────────
+    adx = _v("adx"); di_pos = _v("adx_pos"); di_neg = _v("adx_neg")
+    if adx is None:        regime = "unknown"
+    elif adx >= 25:        regime = "trending"
+    elif adx <= 20:        regime = "ranging"
+    else:                  regime = "transitional"
+    # 趋势方向（DI+ vs DI-）
+    if di_pos and di_neg:
+        trend_dir = "up" if di_pos > di_neg else "down"
+    else:
+        trend_dir = "unknown"
+
+    # ── 9. OFI（主动成交量方向）────────────────────────
+    ofi = _v("ofi")
+    if ofi is None:        ofi_dir = "unknown"
+    elif ofi > 0.2:        ofi_dir = "buy"
+    elif ofi < -0.2:       ofi_dir = "sell"
+    else:                  ofi_dir = "neutral"
+
+    # ── 10. ATR 百分位（波动率分层）─────────────────────
+    if "atr" in df.columns:
+        atr_win = df["atr"].iloc[max(0, i-99):i+1].dropna()
+        atr_cur = _v("atr")
+        if len(atr_win) >= 10 and atr_cur:
+            atr_rank = float((atr_win < atr_cur).mean())
+        else:
+            atr_rank = 0.5
+    else:
+        atr_rank = 0.5
+    vol_regime = "high" if atr_rank >= 0.75 else ("low" if atr_rank <= 0.25 else "normal")
+
+    # ── 11. VWAP 位置 ────────────────────────────────────
+    vwap = _v("vwap")
+    above_vwap = bool(close > vwap) if vwap else None
+
+    # ── 12. 价格动量（5 根收益率方向）───────────────────
+    if i >= 5:
+        price_5ago = float(df["close"].iloc[i-5])
+        momentum   = "up" if close > price_5ago * 1.002 else ("down" if close < price_5ago * 0.998 else "flat")
+    else:
+        momentum = "unknown"
+
+    return {
+        # 核心信号（高权重）
+        "rsi_zone":    rsi_zone,      # RSI 分区
+        "regime":      regime,         # 市场机制（趋势/震荡）
+        "trend_dir":   trend_dir,      # DI 趋势方向
+        "vol_regime":  vol_regime,     # 波动率环境
+        "macd_bull":   macd_bull,      # MACD 方向
+        "bb_zone":     bb_zone,        # 布林带位置
+        # 次要信号（中权重）
+        "above_ma50":  above_ma50,     # 价格在 MA50 上下
+        "above_ma200": above_ma200,    # 价格在 MA200 上下
+        "ma_cross":    ma_cross,       # 金叉/死叉区
+        "kdj_zone":    kdj_zone,       # KDJ 状态
+        "obv_trend":   obv_trend,      # OBV 方向
+        "momentum":    momentum,       # 5根动量
+        # 辅助信号（低权重）
+        "above_ma20":  above_ma20,     # 价格在 MA20 上下
+        "macd_expand": macd_expand,    # MACD 柱扩张
+        "bb_squeeze":  bb_squeeze,     # 布林带压缩
+        "above_vwap":  above_vwap,     # VWAP 位置
+        "ofi_dir":     ofi_dir,        # 主动成交量方向
+    }
+
+
+def _signal_similarity(s1: dict, s2: dict) -> float:
+    """
+    计算两个信号状态的加权相似度 [0, 1]。
+    权重设计：核心市场结构指标权重高，辅助指标权重低，
+    既保证形态相似度，又不过度苛刻导致样本不足。
+    """
+    keys_weight = {
+        # 核心信号（权重 2.0）——决定市场性质，必须匹配
+        "rsi_zone":    2.0,
+        "regime":      2.0,
+        "vol_regime":  2.0,
+        # 重要信号（权重 1.5）——决定方向偏向
+        "macd_bull":   1.5,
+        "bb_zone":     1.5,
+        "trend_dir":   1.5,
+        "above_ma50":  1.5,
+        "ma_cross":    1.5,
+        # 次要信号（权重 1.0）
+        "above_ma200": 1.0,
+        "kdj_zone":    1.0,
+        "obv_trend":   1.0,
+        "momentum":    1.0,
+        # 辅助信号（权重 0.5）——噪音较多，权重最低
+        "above_ma20":  0.5,
+        "macd_expand": 0.5,
+        "bb_squeeze":  0.5,
+        "above_vwap":  0.5,
+        "ofi_dir":     0.5,
+    }
+    total_w = sum(keys_weight.values())
+    match_w = 0.0
+    for k, w in keys_weight.items():
+        v1, v2 = s1.get(k), s2.get(k)
+        if v1 is None or v2 is None:
+            match_w += w * 0.5   # 缺失数据算半分
+        elif v1 == v2:
+            match_w += w
+    return match_w / total_w
+
+
+def run_backtest(df: pd.DataFrame, current_signal: dict,
+                 hold_bars: int = 5,
+                 atr_sl_mult: float = 1.5,
+                 atr_tp_mult: float = 3.0,
+                 min_samples: int = 20,
+                 similarity_thresh: float = 0.62) -> dict:
+    """
+    即时回测引擎：在 df（建议 1500 根以上）中找出与 current_signal
+    相似的历史形态，多维度统计胜率、盈亏比、期望值，并生成详细描述。
+
+    参数:
+        df                : 含全部指标的长历史 DataFrame
+        current_signal    : _extract_signal_state 生成的当前信号字典
+        hold_bars         : 主要持仓 K 线数
+        atr_sl_mult       : 止损倍数（×ATR）
+        atr_tp_mult       : 止盈倍数（×ATR）
+        min_samples       : 最少有效样本数
+        similarity_thresh : 相似度阈值，降低可增加样本量
+    """
+    # ── 1. 确定信号方向 ─────────────────────────────────
+    rsi_z  = current_signal.get("rsi_zone", "neutral")
+    bb_z   = current_signal.get("bb_zone",  "neutral")
+    macd_b = current_signal.get("macd_bull", None)
+    regime = current_signal.get("regime", "unknown")
+    td     = current_signal.get("trend_dir", "unknown")
+    mom    = current_signal.get("momentum", "unknown")
+
+    bull_hints = sum([
+        rsi_z in ("oversold", "strong"),
+        bb_z  in ("above_mid", "above_upper"),
+        macd_b is True,
+        current_signal.get("above_ma50")  is True,
+        current_signal.get("above_ma200") is True,
+        current_signal.get("ma_cross")    == "golden",
+        current_signal.get("kdj_zone")    in ("bull", "oversold"),
+        current_signal.get("obv_trend")   == "up",
+        td    == "up",
+        mom   == "up",
+        current_signal.get("above_vwap")  is True,
+    ])
+    bear_hints = sum([
+        rsi_z in ("overbought", "weak"),
+        bb_z  in ("below_mid", "below_lower"),
+        macd_b is False,
+        current_signal.get("above_ma50")  is False,
+        current_signal.get("above_ma200") is False,
+        current_signal.get("ma_cross")    == "death",
+        current_signal.get("kdj_zone")    in ("bear", "overbought"),
+        current_signal.get("obv_trend")   == "down",
+        td    == "down",
+        mom   == "down",
+        current_signal.get("above_vwap")  is False,
+    ])
+    direction     = "long" if bull_hints >= bear_hints else "short"
+    bull_strength = bull_hints / max(1, bull_hints + bear_hints)  # 多头倾向强度
+
+    n         = len(df)
+    warm_bars = 200   # 指标预热所需
+    start_idx = warm_bars
+    # 多持仓周期：[hold_bars, hold_bars*2, hold_bars//2]，取最优者作为主结果
+    hold_variants = sorted(set([
+        max(2, hold_bars // 2),
+        hold_bars,
+        hold_bars * 2,
+    ]))
+
+    # ── 2. 扫描历史相似形态 ──────────────────────────────
+    matches = []   # 每条: {idx, sim, entry, atr}
+    for i in range(start_idx, n - max(hold_variants) - 1):
+        hist_sig = _extract_signal_state(df, i)
+        sim      = _signal_similarity(current_signal, hist_sig)
+        if sim < similarity_thresh:
+            continue
+        atr_i = float(df["atr"].iloc[i]) if "atr" in df.columns and not pd.isna(df["atr"].iloc[i]) \
+                else float(df["close"].iloc[i]) * 0.015
+        matches.append({
+            "idx":   i,
+            "sim":   sim,
+            "entry": float(df["close"].iloc[i]),
+            "atr":   atr_i,
+            "date":  str(df["date"].iloc[i])[:16],
+        })
+
+    # ── 3. 多持仓周期回测 ───────────────────────────────
+    def _calc_period(hb: int):
+        """对给定持仓周期 hb 跑回测，返回统计字典。"""
+        wins = []; losses = []
+        sl_hits = 0; tp_hits = 0; timeout_exits = 0
+        details = []
+        for m in matches:
+            i           = m["idx"]
+            entry_price = m["entry"]
+            atr_i       = m["atr"]
+            sl_price = entry_price - atr_sl_mult * atr_i if direction == "long" \
+                       else entry_price + atr_sl_mult * atr_i
+            tp_price = entry_price + atr_tp_mult * atr_i if direction == "long" \
+                       else entry_price - atr_tp_mult * atr_i
+
+            hit_sl = False; hit_tp = False
+            exit_pct = 0.0
+            for j in range(i + 1, min(i + hb + 1, n)):
+                hi = float(df["high"].iloc[j])
+                lo = float(df["low"].iloc[j])
+                if direction == "long":
+                    if lo <= sl_price:
+                        hit_sl = True; sl_hits += 1
+                        exit_pct = (sl_price - entry_price) / entry_price * 100; break
+                    if hi >= tp_price:
+                        hit_tp = True; tp_hits += 1
+                        exit_pct = (tp_price - entry_price) / entry_price * 100; break
+                else:
+                    if hi >= sl_price:
+                        hit_sl = True; sl_hits += 1
+                        exit_pct = (entry_price - sl_price) / entry_price * 100 * -1; break
+                    if lo <= tp_price:
+                        hit_tp = True; tp_hits += 1
+                        exit_pct = (entry_price - tp_price) / entry_price * 100; break
+
+            if not hit_sl and not hit_tp:
+                timeout_exits += 1
+                ep  = float(df["close"].iloc[min(i + hb, n - 1)])
+                exit_pct = (ep - entry_price) / entry_price * 100
+                if direction == "short":
+                    exit_pct = -exit_pct
+
+            if exit_pct > 0:
+                wins.append(exit_pct)
+            else:
+                losses.append(exit_pct)
+            details.append({**m, "exit_pct": round(exit_pct, 3), "win": exit_pct > 0})
+
+        total = len(wins) + len(losses)
+        if total == 0:
+            return None
+        win_rate   = len(wins) / total
+        avg_win    = float(np.mean(wins))   if wins   else 0.0
+        avg_loss   = float(np.mean(losses)) if losses else 0.0
+        rr         = abs(avg_win / avg_loss) if avg_loss != 0 else 99.0
+        expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
+        return {
+            "hold_bars":     hb,
+            "total":         total,
+            "wins":          len(wins),
+            "losses":        len(losses),
+            "win_rate":      round(win_rate,  4),
+            "avg_win_pct":   round(avg_win,   3),
+            "avg_loss_pct":  round(avg_loss,  3),
+            "rr_ratio":      round(min(rr, 99.0), 2),
+            "expectancy":    round(expectancy, 3),
+            "sl_hits":       sl_hits,
+            "tp_hits":       tp_hits,
+            "timeout_exits": timeout_exits,
+            "details":       details[-8:],   # 最近 8 条样本
+        }
+
+    period_results = {}
+    for hb in hold_variants:
+        r = _calc_period(hb)
+        if r:
+            period_results[hb] = r
+
+    # ── 4. 主结果取期望值最优的持仓周期 ─────────────────
+    total_matches = len(matches)
+
+    if total_matches < min_samples:
+        return {
+            "win_rate":         None,
+            "loss_rate":        None,
+            "avg_win_pct":      None,
+            "avg_loss_pct":     None,
+            "expectancy":       None,
+            "rr_ratio":         None,
+            "sample_count":     total_matches,
+            "min_samples":      min_samples,
+            "confidence_level": "极低",
+            "confidence_pct":   max(5, int(total_matches / min_samples * 30)),
+            "signal_direction": direction,
+            "bull_strength":    round(bull_strength, 3),
+            "period_results":   period_results,
+            "detail":           [m for m in matches[-8:]],
+            "score":            0,
+            "note":             (
+                f"历史相似形态仅 {total_matches} 次（阈值 {similarity_thresh:.0%}，"
+                f"需 ≥{min_samples}），样本不足；"
+                f"多头信号 {bull_hints} 项，空头信号 {bear_hints} 项"
+            ),
+        }
+
+    # 选期望值最高的持仓周期作为主结果
+    best_hb  = max(period_results, key=lambda h: period_results[h]["expectancy"])
+    best     = period_results[best_hb]
+    win_rate = best["win_rate"]
+    avg_win  = best["avg_win_pct"]
+    avg_loss = best["avg_loss_pct"]
+    rr_ratio = best["rr_ratio"]
+    expectancy = best["expectancy"]
+
+    # ── 5. 置信度计算（胜率 × 样本量权重 × 一致性系数）───
+    sample_weight  = min(1.0, total_matches / 80)     # 80 条满权
+    # 多周期一致性：三个持仓周期的期望值方向一致则加分
+    period_exps    = [v["expectancy"] for v in period_results.values()]
+    consistency    = sum(1 for e in period_exps if (e > 0) == (expectancy > 0)) / max(1, len(period_exps))
+    raw_conf       = win_rate * sample_weight * (0.7 + 0.3 * consistency)
+    if   raw_conf >= 0.60: conf_level = "高";   conf_pct = int(65 + raw_conf * 30)
+    elif raw_conf >= 0.45: conf_level = "中";   conf_pct = int(45 + raw_conf * 40)
+    elif raw_conf >= 0.30: conf_level = "低";   conf_pct = int(25 + raw_conf * 50)
+    else:                  conf_level = "极低"; conf_pct = int(raw_conf * 80)
+    conf_pct = min(95, max(5, conf_pct))
+
+    # ── 6. 评分 ─────────────────────────────────────────
+    if   expectancy >= 0.5:  bt_score = +2
+    elif expectancy >= 0.2:  bt_score = +1
+    elif expectancy >= -0.2: bt_score = 0
+    elif expectancy >= -0.5: bt_score = -1
+    else:                    bt_score = -2
+
+    # ── 7. 详细描述生成 ──────────────────────────────────
+    dir_cn     = "做多" if direction == "long" else "做空"
+    regime_cn  = {"trending": "趋势市", "ranging": "震荡市",
+                  "transitional": "过渡期", "unknown": "未知"}.get(regime, regime)
+    vol_cn     = {"high": "高波动", "low": "低波动", "normal": "正常波动"}.get(
+                  current_signal.get("vol_regime", "normal"), "正常波动")
+    rsi_cn     = {"overbought": "超买区(≥70)", "oversold": "超卖区(≤30)",
+                  "strong": "偏强区(55-70)", "weak": "偏弱区(30-45)",
+                  "neutral": "中性区(45-55)"}.get(rsi_z, rsi_z)
+    bb_cn      = {"above_upper": "布林上轨上方", "below_lower": "布林下轨下方",
+                  "above_mid": "布林中轨上方", "below_mid": "布林中轨下方"}.get(bb_z, bb_z)
+    ma_cross_cn = {"golden": "MA20>MA50 金叉区", "death": "MA20<MA50 死叉区",
+                   "neutral": "均线纠缠"}.get(current_signal.get("ma_cross",""), "")
+    momentum_cn = {"up": "价格上行动量", "down": "价格下行动量", "flat": "动量平缓"}.get(mom, "")
+    obv_cn      = {"up": "OBV上升（资金流入）", "down": "OBV下降（资金流出）"}.get(
+                   current_signal.get("obv_trend",""), "")
+
+    # 构建当前形态特征描述
+    feature_desc = "、".join(filter(None, [
+        rsi_cn, bb_cn, ma_cross_cn, momentum_cn, obv_cn,
+        f"ADX {'≥25' if regime=='trending' else '≤20'} {regime_cn}",
+        vol_cn,
+    ]))
+
+    # 构建回测结论描述
+    if win_rate >= 0.65:
+        wr_desc = f"胜率 {win_rate:.1%} 显著偏高"
+    elif win_rate >= 0.55:
+        wr_desc = f"胜率 {win_rate:.1%} 略偏高"
+    elif win_rate <= 0.40:
+        wr_desc = f"胜率 {win_rate:.1%} 偏低"
+    else:
+        wr_desc = f"胜率 {win_rate:.1%} 接近随机"
+
+    if rr_ratio >= 2.0:
+        rr_desc = f"盈亏比 {rr_ratio:.2f} 优秀"
+    elif rr_ratio >= 1.5:
+        rr_desc = f"盈亏比 {rr_ratio:.2f} 良好"
+    elif rr_ratio >= 1.0:
+        rr_desc = f"盈亏比 {rr_ratio:.2f} 一般"
+    else:
+        rr_desc = f"盈亏比 {rr_ratio:.2f} 不佳"
+
+    if expectancy > 0:
+        exp_desc = f"期望正收益 +{expectancy:.3f}%/笔，策略具备统计优势"
+    else:
+        exp_desc = f"期望负收益 {expectancy:.3f}%/笔，当前形态历史表现欠佳"
+
+    # 多周期一致性描述
+    if len(period_results) >= 2:
+        consistent_cnt = sum(1 for v in period_results.values() if v["expectancy"] > 0)
+        if consistent_cnt == len(period_results):
+            consistency_desc = f"三个持仓周期（{'/'.join(str(h)+'根' for h in sorted(period_results))}）期望值均为正，信号一致性强"
+        elif consistent_cnt == 0:
+            consistency_desc = f"三个持仓周期期望值均为负，跨周期信号一致性差"
+        else:
+            consistency_desc = f"持仓周期一致性一般（{consistent_cnt}/{len(period_results)} 个周期期望为正）"
+    else:
+        consistency_desc = ""
+
+    # 出场方式分布描述
+    sl_rate = best["sl_hits"] / max(1, best["total"])
+    tp_rate = best["tp_hits"] / max(1, best["total"])
+    to_rate = best["timeout_exits"] / max(1, best["total"])
+    exit_desc = (
+        f"历史出场分布：止盈触达 {tp_rate:.1%}、止损触达 {sl_rate:.1%}、"
+        f"超时平仓 {to_rate:.1%}"
+    )
+
+    # 风险提示
+    risk_notes = []
+    if win_rate < 0.45:
+        risk_notes.append("胜率偏低，需严格止损控制单笔亏损")
+    if rr_ratio < 1.0:
+        risk_notes.append("盈亏比不足1，即使胜率50%也会亏损，不建议参考")
+    if total_matches < 30:
+        risk_notes.append(f"样本仅 {total_matches} 条，统计意义有限")
+    if consistency < 0.67:
+        risk_notes.append("多周期信号不一致，持仓时长对结果影响大")
+    if current_signal.get("vol_regime") == "high":
+        risk_notes.append("当前处于高波动环境，实际波动可能超出历史均值")
+
+    description = {
+        "signal_feature":   f"当前形态：{feature_desc}",
+        "direction_reason": (
+            f"综合 {bull_hints} 项多头信号 vs {bear_hints} 项空头信号，"
+            f"判断 {dir_cn} 方向（多头倾向 {bull_strength:.0%}）"
+        ),
+        "backtest_result":  f"{wr_desc}，{rr_desc}，{exp_desc}",
+        "exit_distribution":exit_desc,
+        "consistency":      consistency_desc,
+        "risk_notes":       risk_notes,
+        "best_hold_bars":   best_hb,
+        "period_summary":   {
+            str(hb): f"胜率{v['win_rate']:.1%} 期望{v['expectancy']:+.3f}%"
+            for hb, v in sorted(period_results.items())
+        },
+    }
+
+    return {
+        "win_rate":         win_rate,
+        "loss_rate":        round(1 - win_rate, 4),
+        "avg_win_pct":      avg_win,
+        "avg_loss_pct":     avg_loss,
+        "expectancy":       expectancy,
+        "rr_ratio":         rr_ratio,
+        "sample_count":     total_matches,
+        "min_samples":      min_samples,
+        "similarity_thresh":similarity_thresh,
+        "confidence_level": conf_level,
+        "confidence_pct":   conf_pct,
+        "consistency":      round(consistency, 2),
+        "signal_direction": direction,
+        "bull_strength":    round(bull_strength, 3),
+        "bull_hints":       bull_hints,
+        "bear_hints":       bear_hints,
+        "hold_bars":        best_hb,
+        "atr_sl_mult":      atr_sl_mult,
+        "atr_tp_mult":      atr_tp_mult,
+        "period_results":   {str(k): v for k, v in period_results.items()},
+        "detail":           best.get("details", []),
+        "description":      description,
+        "score":            bt_score,
+        "note": (
+            f"历史 {total_matches} 次相似形态（阈值 {similarity_thresh:.0%}） | "
+            f"最优持仓 {best_hb} 根 | {wr_desc} | {rr_desc} | "
+            f"期望 {expectancy:+.3f}%/笔 | 置信度 {conf_pct}%({conf_level})"
+        ),
+    }
 
 
 # ─────────────────────────────────────────────
