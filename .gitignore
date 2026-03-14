@@ -1,3 +1,6 @@
 /.idea/
 /output/
 /.claude/
+/liq_data.json
+/liq_data.json.tmp
+/__pycache__/
