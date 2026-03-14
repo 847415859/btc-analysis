@@ -594,10 +594,70 @@ def _cluster_liquidations(orders: list, bucket_size: float = 500.0) -> list:
 
 # 存储结构: {symbol: deque of {price, qty, side, ts}}
 # 保留最近 48 小时内的清算记录
-_LIQ_WINDOW_HOURS = 48
+_LIQ_WINDOW_HOURS  = 48
+_LIQ_PERSIST_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "liq_data.json")
+_LIQ_FLUSH_INTERVAL = 300   # 每 5 分钟落盘一次（秒）
+
 _liq_store: dict = {s: collections.deque(maxlen=50_000) for s in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]}
 _liq_lock  = threading.Lock()
 _liq_ws_running = False
+
+
+# ── 持久化：加载 ────────────────────────────────────────────────────────────
+def _liq_load():
+    """启动时从 liq_data.json 恢复历史清算数据，自动丢弃 48h 外的过期记录。"""
+    if not os.path.exists(_LIQ_PERSIST_FILE):
+        print("[清算持久化] 未找到 liq_data.json，跳过恢复")
+        return
+    try:
+        with open(_LIQ_PERSIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cutoff  = time.time() - _LIQ_WINDOW_HOURS * 3600
+        total   = 0
+        with _liq_lock:
+            for sym, records in data.items():
+                if sym not in _liq_store:
+                    continue
+                valid = [r for r in records if r.get("ts", 0) >= cutoff]
+                _liq_store[sym].extend(valid)
+                total += len(valid)
+        print(f"[清算持久化] 已恢复 {total} 条记录（来自 {_LIQ_PERSIST_FILE}）")
+    except Exception as e:
+        print(f"[清算持久化] 恢复失败: {e}")
+
+
+# ── 持久化：落盘 ────────────────────────────────────────────────────────────
+def _liq_flush():
+    """将内存中的清算数据序列化写入 liq_data.json（原子写：先写临时文件再重命名）。"""
+    tmp = _LIQ_PERSIST_FILE + ".tmp"
+    try:
+        cutoff = time.time() - _LIQ_WINDOW_HOURS * 3600
+        with _liq_lock:
+            payload = {
+                sym: [r for r in dq if r["ts"] >= cutoff]
+                for sym, dq in _liq_store.items()
+            }
+        total = sum(len(v) for v in payload.values())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"))   # compact，节省空间
+        os.replace(tmp, _LIQ_PERSIST_FILE)                  # 原子替换，防止写到一半崩溃
+        return total
+    except Exception as e:
+        print(f"[清算持久化] 落盘失败: {e}")
+        if os.path.exists(tmp):
+            try: os.remove(tmp)
+            except: pass
+        return 0
+
+
+# ── 持久化：定时落盘线程 ────────────────────────────────────────────────────
+def _liq_flush_worker():
+    """每 _LIQ_FLUSH_INTERVAL 秒将清算数据落盘一次。"""
+    while True:
+        time.sleep(_LIQ_FLUSH_INTERVAL)
+        total = _liq_flush()
+        if total:
+            print(f"[清算持久化] 落盘完成，共 {total} 条")
 
 
 def _liq_ws_worker():
@@ -1019,11 +1079,20 @@ def liquidations():
         clusters = estimate_liq_clusters_from_sr(symbol, tf_data)
         source   = "estimated"
 
+    persist_info = {
+        "file":       _LIQ_PERSIST_FILE,
+        "flush_every": _LIQ_FLUSH_INTERVAL,
+        "exists":     os.path.exists(_LIQ_PERSIST_FILE),
+        "size_kb":    round(os.path.getsize(_LIQ_PERSIST_FILE) / 1024, 1)
+                      if os.path.exists(_LIQ_PERSIST_FILE) else 0,
+    }
+
     return jsonify({
         "symbol":   symbol,
         "source":   source,
         "hours":    hours,
         "stats":    liq_stats,
+        "persist":  persist_info,
         "clusters": clusters,
     })
 
@@ -1033,12 +1102,19 @@ def liquidations():
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # 启动前先恢复历史清算数据
+    _liq_load()
+
     t = threading.Thread(target=analysis_worker, daemon=True)
     t.start()
 
     # 启动清算 WebSocket 累积线程
     liq_ws_thread = threading.Thread(target=_liq_ws_worker, daemon=True, name="LiquidationWS")
     liq_ws_thread.start()
+
+    # 启动定时落盘线程（每 5 分钟持久化一次）
+    liq_flush_thread = threading.Thread(target=_liq_flush_worker, daemon=True, name="LiqFlush")
+    liq_flush_thread.start()
 
     print("=" * 50)
     print("  多币种实时分析服务器")
