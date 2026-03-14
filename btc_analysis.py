@@ -49,14 +49,27 @@ SYMBOLS = ["BTCUSDT"]
 # ─────────────────────────────────────────────
 
 def fetch_data(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) -> pd.DataFrame:
-    """通过 Binance API 获取 K 线数据"""
+    """通过 Binance API 获取 K 线数据（含 429 限流重试）"""
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    try:
-        resp = requests.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[错误] 无法获取 {symbol} {interval} 数据: {e}")
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, timeout=20)
+            if resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", 60))
+                print(f"[限流] {symbol} {interval} 触发 429，等待 {wait}s (第 {attempt+1}/3 次)")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        except requests.RequestException as e:
+            print(f"[错误] 无法获取 {symbol} {interval} 数据: {e}")
+            return pd.DataFrame()
+    else:
+        print(f"[错误] {symbol} {interval} 超过重试上限，返回空数据")
+        return pd.DataFrame()
+    if resp is None:
         return pd.DataFrame()
 
     raw = resp.json()
@@ -68,7 +81,7 @@ def fetch_data(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) 
     df["date"] = pd.to_datetime(df["open_time"], unit="ms")
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    df = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    df = df[["date", "open", "high", "low", "close", "volume", "taker_buy_base"]].copy()
     df.reset_index(drop=True, inplace=True)
     return df
 
@@ -124,6 +137,45 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr_sl_long"]  = df["close"] - 1.5 * df["atr"]   # 做多止损线（价格下方）
     df["atr_sl_short"] = df["close"] + 1.5 * df["atr"]   # 做空止损线（价格上方）
 
+    # ── 波动率百分位（过去 100 根）→ 自适应参数 ──────────
+    atr_rank = df["atr"].rolling(100).rank(pct=True)
+    _atr_rank_last = atr_rank.iloc[-1]
+    high_vol = (not pd.isna(_atr_rank_last)) and (_atr_rank_last >= 0.75)
+
+    bb_dev  = 2.5 if high_vol else 2.0
+    rsi_win = 21  if high_vol else 14
+
+    # 用自适应参数重新计算（覆盖前面固定参数版本）
+    rsi2 = ta.momentum.RSIIndicator(df["close"], window=rsi_win)
+    df["rsi"] = rsi2.rsi()
+    bb2 = ta.volatility.BollingerBands(df["close"], window=20, window_dev=bb_dev)
+    df["bb_upper"] = bb2.bollinger_hband()
+    df["bb_mid"]   = bb2.bollinger_mavg()
+    df["bb_lower"] = bb2.bollinger_lband()
+
+    # ── ADX + DI(14) ─────────────────────────────────────
+    adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+    df["adx"]     = adx_ind.adx()
+    df["adx_pos"] = adx_ind.adx_pos()   # DI+
+    df["adx_neg"] = adx_ind.adx_neg()   # DI-
+
+    # 将自适应参数存入 DataFrame.attrs（供 generate_report 读取）
+    df.attrs["high_vol"]     = bool(high_vol)
+    df.attrs["bb_dev"]       = bb_dev
+    df.attrs["rsi_win"]      = rsi_win
+    df.attrs["atr_pct_rank"] = float(_atr_rank_last) if not pd.isna(_atr_rank_last) else 0.5
+
+    # ── CVD / OFI（主动成交量差值分析）──────────────────────────────
+    # taker_buy_base = 主动买方成交量（吃单买入），由 K 线 API 直接提供
+    # delta > 0 → 主动买盘主导；delta < 0 → 主动卖盘主导
+    if "taker_buy_base" in df.columns:
+        df["taker_buy"]  = df["taker_buy_base"].astype(float)
+        df["taker_sell"] = df["volume"] - df["taker_buy"]
+        df["delta"]      = df["taker_buy"] - df["taker_sell"]
+        df["cvd"]        = df["delta"].cumsum()
+        # OFI: 每根K线的买卖失衡比，范围 [-1, +1]
+        df["ofi"] = (df["delta"] / df["volume"].replace(0, np.nan)).fillna(0).clip(-1, 1)
+
     return df
 
 
@@ -131,9 +183,25 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # C. 支撑 / 阻力识别
 # ─────────────────────────────────────────────
 
-def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5, cluster_pct: float = 0.015):
+def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5,
+                             cluster_pct: float = 0.015, ob_levels: list = None):
     recent = df.tail(lookback).copy()
     current_price = df["close"].iloc[-1]
+
+    # ── 自适应 pivot_n：根据 ATR 百分位动态调整分形窗口 ─────────────
+    if "atr" in df.columns:
+        atr_series = df["atr"].dropna()
+        if len(atr_series) >= 200:
+            atr_hist     = atr_series.iloc[-200:].values
+            current_atr  = float(atr_series.iloc[-1])
+            atr_pct_rank = (
+                np.searchsorted(np.sort(atr_hist), current_atr)
+                / len(atr_hist) * 100
+            )
+            if atr_pct_rank >= 75:      # 高波动：缩小窗口，及时响应转折点
+                pivot_n = max(2, pivot_n - 1)
+            elif atr_pct_rank <= 25:    # 低波动：扩大窗口，过滤震荡噪音
+                pivot_n = min(8, pivot_n + 2)
 
     # 1. 识别高低点 (Pivots) - 权重 1.0
     raw_levels = []
@@ -141,9 +209,9 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
         w_h = recent["high"].iloc[i - pivot_n: i + pivot_n + 1]
         w_l = recent["low"].iloc[i - pivot_n: i + pivot_n + 1]
         if recent["high"].iloc[i] == w_h.max():
-            raw_levels.append((recent["high"].iloc[i], 1.0))
+            raw_levels.append((recent["high"].iloc[i], 1.0, "pivot"))
         if recent["low"].iloc[i] == w_l.min():
-            raw_levels.append((recent["low"].iloc[i], 1.0))
+            raw_levels.append((recent["low"].iloc[i], 1.0, "pivot"))
 
     # 2. 识别成交量密集区 (Volume Profile) - 权重 2.0
     price_range = recent["close"].max() - recent["close"].min()
@@ -154,52 +222,54 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
         for _, row in recent.iterrows():
             idx = min(int((row["close"] - recent["close"].min()) / price_range * num_bins), num_bins - 1)
             vol_profile[idx] += row["volume"]
-        
+
         # 取成交量最大的前 15 个 bin 的中心价
         bin_centers = (bins[:-1] + bins[1:]) / 2
         top_vol_idx = np.argsort(vol_profile)[-15:]
         for idx in top_vol_idx:
-            raw_levels.append((bin_centers[idx], 2.0))
+            raw_levels.append((bin_centers[idx], 2.0, "volume"))
 
-    # 3. 聚类合并
+    # 3. 订单簿挂单墙（来自 server.py 的实时深度快照）
+    if ob_levels:
+        for ob_price, ob_weight, ob_side in ob_levels:
+            # 只收录当前价格 ±20% 范围内的价格层
+            if 0.8 * current_price <= ob_price <= 1.2 * current_price:
+                raw_levels.append((ob_price, ob_weight, ob_side))
+
+    # 4. 聚类合并（支持 3-tuple，合并来源标签）
     def cluster_levels(levels_with_weight, thr=0.015):
-        if not levels_with_weight: return []
-        # 按价格排序
+        if not levels_with_weight:
+            return []
         levels_with_weight.sort(key=lambda x: x[0])
-        
-        clusters = []
-        current_cluster = [levels_with_weight[0]]
-        
-        for p, w in levels_with_weight[1:]:
-            last_p = current_cluster[-1][0]
-            if abs(p - last_p) / last_p < thr:
-                current_cluster.append((p, w))
+
+        def _finalize(cluster):
+            prices  = [x[0] for x in cluster]
+            weights = [x[1] for x in cluster]
+            # 合并来源标签：去重、保序，防止累积重复
+            srcs = list(dict.fromkeys(
+                s for x in cluster
+                for s in (x[2] if len(x) > 2 else "pivot").split("+")
+            ))
+            return (np.average(prices, weights=weights), sum(weights), "+".join(srcs))
+
+        clusters, cur = [], [levels_with_weight[0]]
+        for item in levels_with_weight[1:]:
+            if abs(item[0] - cur[-1][0]) / cur[-1][0] < thr:
+                cur.append(item)
             else:
-                # 结算当前簇
-                prices = [x[0] for x in current_cluster]
-                weights = [x[1] for x in current_cluster]
-                avg_price = np.average(prices, weights=weights)
-                total_weight = sum(weights)
-                clusters.append((avg_price, total_weight))
-                current_cluster = [(p, w)]
-        
-        # 结算最后一个簇
-        prices = [x[0] for x in current_cluster]
-        weights = [x[1] for x in current_cluster]
-        avg_price = np.average(prices, weights=weights)
-        total_weight = sum(weights)
-        clusters.append((avg_price, total_weight))
-        
+                clusters.append(_finalize(cur))
+                cur = [item]
+        clusters.append(_finalize(cur))
         return clusters
 
     consolidated = cluster_levels(raw_levels, thr=cluster_pct)
 
-    # 4. 区分支撑/阻力
-    supports    = [(p, w) for p, w in consolidated if p < current_price]
-    resistances = [(p, w) for p, w in consolidated if p > current_price]
+    # 5. 区分支撑/阻力
+    supports    = [(p, w, src) for p, w, src in consolidated if p < current_price]
+    resistances = [(p, w, src) for p, w, src in consolidated if p > current_price]
 
-    # 5. 排序并取前5 (按距离排序)
-    supports = sorted(supports, key=lambda x: x[0], reverse=True)[:5]
+    # 6. 排序并取前5 (按距离排序)
+    supports    = sorted(supports,    key=lambda x: x[0], reverse=True)[:5]
     resistances = sorted(resistances, key=lambda x: x[0])[:5]
 
     return supports, resistances
@@ -381,6 +451,22 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     rd["price"] = price
     rd["tf"]    = tf_label
 
+    # ── 市场机制识别 ─────────────────────────────────────
+    adx_val  = latest["adx"]     if "adx"     in df.columns else np.nan
+    di_plus  = latest["adx_pos"] if "adx_pos" in df.columns else np.nan
+    di_minus = latest["adx_neg"] if "adx_neg" in df.columns else np.nan
+    high_vol     = df.attrs.get("high_vol",     False)
+    bb_dev       = df.attrs.get("bb_dev",       2.0)
+    rsi_win      = df.attrs.get("rsi_win",      14)
+    atr_pct_rank = df.attrs.get("atr_pct_rank", 0.5)
+
+    if not pd.isna(adx_val):
+        if adx_val >= 25:   regime = "trending"
+        elif adx_val <= 20: regime = "ranging"
+        else:               regime = "transitional"
+    else:
+        regime = "unknown"
+
     # ── 均线 ──
     emit(f"【均线系统】{sep}")
     ma_items = [
@@ -396,20 +482,34 @@ def generate_report(df: pd.DataFrame, supports, resistances,
             continue
         diff_pct = (price - val) / val * 100
         is_above = price > val
-        score += 1 if is_above else -1
-        emit(f"  {name:<6}({desc}): ${val:>10,.2f}  {'上方 ↑' if is_above else '下方 ↓'} {diff_pct:+.2f}%  [{'+'if is_above else'-'}]")
+        # 震荡市禁用 MA 突破评分（防假突破）
+        ma_active = (regime != "ranging")
+        if ma_active:
+            score += 1 if is_above else -1
+        regime_note = "" if ma_active else " [震荡市-暂停]"
+        emit(f"  {name:<6}({desc}): ${val:>10,.2f}  {'上方 ↑' if is_above else '下方 ↓'} {diff_pct:+.2f}%  [{'+'if is_above else'-'}]{regime_note}")
         rd["ma"].append({"name": name, "desc": desc, "val": val,
-                         "diff_pct": diff_pct, "above": is_above, "signal": "+" if is_above else "-"})
+                         "diff_pct": diff_pct, "above": is_above, "signal": "+" if is_above else "-",
+                         "active": ma_active})
 
     # ── RSI ──
     rsi_val = latest["rsi"]
-    emit(f"\n【RSI(14)】{sep}")
+    emit(f"\n【RSI({rsi_win})】{sep}")
     rsi_score = 0
-    if rsi_val >= 70:   rsi_signal = "超买区域 (>=70) 可能回调"; rsi_score = -2
-    elif rsi_val <= 30: rsi_signal = "超卖区域 (<=30) 可能反弹"; rsi_score = +2
-    elif rsi_val >= 55: rsi_signal = "偏强区域 (55-70)";          rsi_score = +1
-    elif rsi_val <= 45: rsi_signal = "偏弱区域 (30-45)";          rsi_score = -1
-    else:               rsi_signal = "中性区域 (45-55)";           rsi_score = 0
+    if regime == "trending":
+        # 趋势市：超买/超卖逆势信号禁用，只保留强弱方向
+        if rsi_val >= 70:   rsi_signal = "超买(趋势市-暂不做空)"; rsi_score = 0
+        elif rsi_val <= 30: rsi_signal = "超卖(趋势市-暂不做多)"; rsi_score = 0
+        elif rsi_val >= 55: rsi_signal = "偏强区域 (55-70)";       rsi_score = +1
+        elif rsi_val <= 45: rsi_signal = "偏弱区域 (30-45)";       rsi_score = -1
+        else:               rsi_signal = "中性区域 (45-55)";        rsi_score = 0
+    else:
+        # 震荡市/过渡区：完整逆势评分
+        if rsi_val >= 70:   rsi_signal = "超买区域 (>=70) 可能回调"; rsi_score = -2
+        elif rsi_val <= 30: rsi_signal = "超卖区域 (<=30) 可能反弹"; rsi_score = +2
+        elif rsi_val >= 55: rsi_signal = "偏强区域 (55-70)";          rsi_score = +1
+        elif rsi_val <= 45: rsi_signal = "偏弱区域 (30-45)";          rsi_score = -1
+        else:               rsi_signal = "中性区域 (45-55)";           rsi_score = 0
     score += rsi_score
     emit(f"  RSI = {rsi_val:.2f}  ->  {rsi_signal}")
     rd["rsi"] = {"val": rsi_val, "signal": rsi_signal, "score": rsi_score}
@@ -452,18 +552,34 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     k_val, d_val, j_val = latest["kdj_k"], latest["kdj_d"], latest["kdj_j"]
     emit(f"\n【KDJ(9,3,3)】{sep}")
     kdj_score = 0
-    if k_val > d_val and prev["kdj_k"] <= prev["kdj_d"]:
-        kdj_signal = "K 上穿 D -> 金叉买入信号"; kdj_score = +2
-    elif k_val < d_val and prev["kdj_k"] >= prev["kdj_d"]:
-        kdj_signal = "K 下穿 D -> 死叉卖出信号"; kdj_score = -2
-    elif k_val >= 80:
-        kdj_signal = "超买区域 (K>=80)"; kdj_score = -1
-    elif k_val <= 20:
-        kdj_signal = "超卖区域 (K<=20)"; kdj_score = +1
-    elif k_val > d_val:
-        kdj_signal = "K > D 偏多"; kdj_score = +1
+    if regime == "trending":
+        # 趋势市：超买/超卖逆势信号禁用，金叉/死叉顺势保留
+        if k_val > d_val and prev["kdj_k"] <= prev["kdj_d"]:
+            kdj_signal = "K 上穿 D -> 金叉(趋势加速)"; kdj_score = +2
+        elif k_val < d_val and prev["kdj_k"] >= prev["kdj_d"]:
+            kdj_signal = "K 下穿 D -> 死叉(趋势加速)"; kdj_score = -2
+        elif k_val >= 80:
+            kdj_signal = "超买(趋势市-持仓不做空)"; kdj_score = 0
+        elif k_val <= 20:
+            kdj_signal = "超卖(趋势市-持仓不做多)"; kdj_score = 0
+        elif k_val > d_val:
+            kdj_signal = "K > D 顺势偏多"; kdj_score = +1
+        else:
+            kdj_signal = "K < D 顺势偏空"; kdj_score = -1
     else:
-        kdj_signal = "K < D 偏空"; kdj_score = -1
+        # 震荡市/过渡区：完整高抛低吸逻辑
+        if k_val > d_val and prev["kdj_k"] <= prev["kdj_d"]:
+            kdj_signal = "K 上穿 D -> 金叉买入信号"; kdj_score = +2
+        elif k_val < d_val and prev["kdj_k"] >= prev["kdj_d"]:
+            kdj_signal = "K 下穿 D -> 死叉卖出信号"; kdj_score = -2
+        elif k_val >= 80:
+            kdj_signal = "超买区域 (K>=80)"; kdj_score = -1
+        elif k_val <= 20:
+            kdj_signal = "超卖区域 (K<=20)"; kdj_score = +1
+        elif k_val > d_val:
+            kdj_signal = "K > D 偏多"; kdj_score = +1
+        else:
+            kdj_signal = "K < D 偏空"; kdj_score = -1
     score += kdj_score
     emit(f"  K: {k_val:.2f}  D: {d_val:.2f}  J: {j_val:.2f}")
     emit(f"  信号: {kdj_signal}")
@@ -481,26 +597,83 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     rd["obv"] = {"now": obv_now, "prev": obv_prev, "trend": obv_trend,
                  "up": obv_up, "score": obv_score}
 
+    # ── CVD（主动成交量差值背离）────────────────────────────────────
+    cvd_score  = 0
+    cvd_signal = "暂无数据"
+    last_ofi   = 0.0
+    last_delta = 0.0
+    last_cvd   = 0.0
+    emit(f"\n【CVD 成交量差值 / Order Flow】{sep}")
+    if "cvd" in df.columns and "ofi" in df.columns and len(df) >= 20:
+        recent     = df.tail(20)
+        p_start    = float(recent["close"].iloc[0])
+        p_end      = float(recent["close"].iloc[-1])
+        cvd_start  = float(recent["cvd"].iloc[0])
+        cvd_end    = float(recent["cvd"].iloc[-1])
+        avg_vol    = float(recent["volume"].mean()) or 1.0
+        norm_price = (p_end - p_start) / p_start          # 价格变化率
+        norm_cvd   = (cvd_end - cvd_start) / avg_vol      # CVD 变化 / 平均成交量
+        last_ofi   = float(df["ofi"].iloc[-1])
+        last_delta = float(df["delta"].iloc[-1])
+        last_cvd   = float(df["cvd"].iloc[-1])
+
+        if norm_price > 0.005 and norm_cvd < -0.15:
+            cvd_score  = -2
+            cvd_signal = f"顶背离 ⚠️ 价格↑ 但主动卖盘主导(CVD Δ{norm_cvd:+.2f})，警惕派发出货"
+        elif norm_price < -0.005 and norm_cvd > 0.15:
+            cvd_score  = +2
+            cvd_signal = f"底背离 ✅ 价格↓ 但主动买盘吸收(CVD Δ{norm_cvd:+.2f})，关注见底信号"
+        elif norm_price > 0.003 and norm_cvd > 0.15:
+            cvd_score  = +1
+            cvd_signal = f"多头共振 ✅ 价格↑ + 主动买盘推动(Δ{norm_cvd:+.2f})，突破可信"
+        elif norm_price < -0.003 and norm_cvd < -0.15:
+            cvd_score  = -1
+            cvd_signal = f"空头共振 ⚠️ 价格↓ + 主动卖盘主导(Δ{norm_cvd:+.2f})，下跌确认"
+        elif last_ofi > 0.2:
+            cvd_signal = f"当前K线主动买盘偏多 OFI {last_ofi:+.2f}"
+        elif last_ofi < -0.2:
+            cvd_signal = f"当前K线主动卖盘偏多 OFI {last_ofi:+.2f}"
+        else:
+            cvd_signal = f"主动买卖均衡 OFI {last_ofi:+.2f}"
+
+        score += cvd_score
+        emit(f"  OFI(最后K): {last_ofi:+.3f}  Delta: {last_delta:+,.0f}")
+        emit(f"  近20K CVD变化率: {norm_cvd:+.3f}  价格变化率: {norm_price:+.3f}")
+    else:
+        emit("  taker_buy 数据不可用，跳过 CVD 分析")
+    emit(f"  信号: {cvd_signal}  得分: {cvd_score:+d}")
+    rd["cvd"] = {
+        "score":      cvd_score,
+        "signal":     cvd_signal,
+        "last_ofi":   round(last_ofi,   4),
+        "last_delta": round(last_delta, 2),
+        "last_cvd":   round(last_cvd,   2),
+    }
+
     # ── 支撑/阻力 ──
     emit(f"\n【支撑 / 阻力位】{sep}")
     emit("  阻力位 (从近到远):")
     res_list = []
-    for pr, sr_score in sorted(resistances, key=lambda x: x[0]):
+    for level in sorted(resistances, key=lambda x: x[0]):
+        pr, sr_score = level[0], level[1]
+        src = level[2] if len(level) > 2 else "pivot"
         dist = (pr - price) / price * 100
-        confidence = min(5.0, sr_score) 
-        stars = f"{confidence:.1f}"
-        emit(f"    ${pr:>10,.2f}  距当前 +{dist:.2f}%  强度:{stars} ({sr_score:.1f})")
-        res_list.append({"price": pr, "dist_pct": dist, "score": sr_score, "stars_val": confidence})
-        
+        confidence = min(5.0, sr_score)
+        emit(f"    ${pr:>10,.2f}  距当前 +{dist:.2f}%  强度:{confidence:.1f} ({sr_score:.1f}) [{src}]")
+        res_list.append({"price": pr, "dist_pct": dist, "score": sr_score,
+                         "stars_val": confidence, "source": src})
+
     emit("  支撑位 (从近到远):")
     sup_list = []
-    for ps, sr_score in sorted(supports, key=lambda x: x[0], reverse=True):
+    for level in sorted(supports, key=lambda x: x[0], reverse=True):
+        ps, sr_score = level[0], level[1]
+        src = level[2] if len(level) > 2 else "pivot"
         dist = (price - ps) / price * 100
-        confidence = min(5.0, sr_score) 
-        stars = f"{confidence:.1f}"
-        emit(f"    ${ps:>10,.2f}  距当前 -{dist:.2f}%  强度:{stars} ({sr_score:.1f})")
-        sup_list.append({"price": ps, "dist_pct": dist, "score": sr_score, "stars_val": confidence})
-    
+        confidence = min(5.0, sr_score)
+        emit(f"    ${ps:>10,.2f}  距当前 -{dist:.2f}%  强度:{confidence:.1f} ({sr_score:.1f}) [{src}]")
+        sup_list.append({"price": ps, "dist_pct": dist, "score": sr_score,
+                         "stars_val": confidence, "source": src})
+
     rd["resistances"] = res_list
     rd["supports"]    = sup_list
 
@@ -514,8 +687,20 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         fib_out.append({"label": label, "price": fp, "dist_pct": dist, "near": abs(dist) < 2})
     rd["fib"] = fib_out
 
+    # ── 市场机制写入 rd ──────────────────────────────────
+    rd["regime"] = {
+        "adx":          round(float(adx_val), 2)  if not pd.isna(adx_val)  else None,
+        "di_plus":      round(float(di_plus),  2)  if not pd.isna(di_plus)  else None,
+        "di_minus":     round(float(di_minus), 2)  if not pd.isna(di_minus) else None,
+        "type":         regime,
+        "high_vol":     high_vol,
+        "bb_dev":       bb_dev,
+        "rsi_win":      rsi_win,
+        "atr_pct_rank": round(atr_pct_rank, 2),
+    }
+
     # ── 综合信号 ──
-    max_score = 16
+    max_score = 18
     emit(f"\n{'═'*60}")
     if score >= 5:   
         overall = f"偏多头  (得分: {score:+d}/{max_score})"

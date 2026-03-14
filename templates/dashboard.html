@@ -139,6 +139,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .score-bar-bull  { height: 6px; background: var(--bull); border-radius: 2px; transition: width .5s; }
 .score-bar-bear  { height: 6px; background: var(--bear); border-radius: 2px; transition: width .5s; }
 .score-bar-label { font-size: 10px; color: var(--text3); }
+.sr-badge { font-size: 9px; padding: 1px 4px; border-radius: 3px;
+  background: rgba(255,255,255,0.07); color: var(--text3);
+  letter-spacing: .3px; white-space: nowrap; }
 
 .chart-area { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .chart-toolbar {
@@ -477,6 +480,18 @@ const fmtN  = n => n == null ? '--' : Number(n).toLocaleString('en-US',{minimumF
 const sc    = s => s > 0 ? 'bull' : (s < 0 ? 'bear' : 'neutral');
 const noNaN = arr => arr.map(v => (v == null || isNaN(v)) ? null : v);
 
+// S/R 来源徽章：📋 挂单墙 | 📊 成交量节点 | 空=纯分形（不显示，保持简洁）
+function srBadge(source) {
+  if (!source) return '';
+  const parts = source.split('+');
+  const hasOB  = parts.some(p => p.startsWith('orderbook'));
+  const hasVol = parts.includes('volume');
+  if (hasOB && hasVol) return '<span class="sr-badge">📋+📊</span>';
+  if (hasOB)           return '<span class="sr-badge">📋 挂单墙</span>';
+  if (hasVol)          return '<span class="sr-badge">📊</span>';
+  return '';
+}
+
 function setEls(ids, val) { ids.forEach(([id, v]) => { const el = document.getElementById(id); if(el) el.textContent = v || val; }); }
 
 /* ══════════════════════════════════════════════════════
@@ -661,7 +676,9 @@ function startCountdown(secs) {
 /* ══════════════════════════════════════════════════════
    轮询状态
 ══════════════════════════════════════════════════════ */
-let _lastUpdate = null;
+let _lastUpdate   = null;
+let lastUpdateId  = 0;   // 追踪 update_id，检测新一轮全量刷新完成
+
 async function pollStatus() {
   try {
     const r = await fetch(`/api/status?symbol=${currentSymbol}`);
@@ -670,6 +687,14 @@ async function pollStatus() {
     document.getElementById('updatingDot')?.classList.toggle('active', d.updating);
     document.getElementById('mUpdatingDot')?.classList.toggle('active', d.updating);
     startCountdown(d.seconds_remaining);
+
+    // 检测 update_id 变化（非首次加载时显示 toast）
+    const newId = d.update_id || 0;
+    if (newId > 0 && newId !== lastUpdateId && lastUpdateId !== 0) {
+      showToast('数据已更新 ✓');
+    }
+    if (newId > 0) lastUpdateId = newId;
+
     if ((d.last_update && d.last_update !== _lastUpdate) || (d.ready && !analysisData._ready)) {
       _lastUpdate = d.last_update;
       if (d.last_update) {
@@ -679,6 +704,99 @@ async function pollStatus() {
       await fetchAnalysisAndUpdate();
     }
   } catch(e) { console.warn('status poll failed', e); }
+}
+
+function showToast(msg, duration = 2500) {
+  let t = document.getElementById('update-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'update-toast';
+    t.style.cssText = [
+      'position:fixed', 'bottom:20px', 'right:20px', 'z-index:9999',
+      'background:#26a69a', 'color:#fff', 'padding:7px 14px',
+      'border-radius:6px', 'font-size:12px', 'opacity:0',
+      'transition:opacity .3s', 'pointer-events:none'
+    ].join(';');
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, duration);
+}
+
+/* ══════════════════════════════════════════════════════
+   踏印图（Footprint Chart）Modal
+══════════════════════════════════════════════════════ */
+async function showFootprint() {
+  let modal = document.getElementById('footprint-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'footprint-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center';
+    modal.innerHTML = `
+      <div style="background:#131722;border:1px solid #2a2e39;border-radius:8px;width:min(96vw,560px);max-height:85vh;overflow:hidden;display:flex;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #2a2e39">
+          <span style="font-weight:600;font-size:13px">踏印图 · 最近K线逐笔买卖量</span>
+          <button onclick="document.getElementById('footprint-modal').remove()" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:18px;line-height:1">×</button>
+        </div>
+        <div id="fp-body" style="overflow-y:auto;padding:12px 16px;font-size:11px">
+          <div style="text-align:center;padding:20px;color:var(--text3)">加载中…</div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  }
+
+  const body = document.getElementById('fp-body');
+  body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3)">加载中…</div>';
+
+  try {
+    const r = await fetch(`/api/footprint/${currentTf}?symbol=${currentSymbol}`);
+    const d = await r.json();
+    if (d.error) { body.innerHTML = `<div style="color:#ef5350;padding:16px">${d.error}</div>`; return; }
+
+    const buckets = d.buckets || [];
+    const maxVol  = Math.max(...buckets.map(b => b.buy + b.sell), 1);
+    const barW    = 180;  // max bar pixel width
+
+    const headerHtml = `
+      <div style="display:flex;justify-content:space-between;color:var(--text3);margin-bottom:6px;font-size:10px">
+        <span>${currentSymbol} · ${currentTf} · ${d.candle_time}</span>
+        <span>档位 $${d.bucket_size} · ${d.total_trades} 笔${d.total_trades>=1000?' (样本)':''}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:80px 1fr 1fr 60px;gap:2px 4px;color:var(--text3);font-size:10px;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid #2a2e39">
+        <span>价格</span><span style="color:#ef5350">主动卖 ◀</span><span style="color:#26a69a">▶ 主动买</span><span>Delta</span>
+      </div>`;
+
+    const rowsHtml = buckets.map(b => {
+      const isPOC   = b.price === d.poc_price;
+      const isCur   = Math.abs(b.price - d.current_price) <= d.bucket_size;
+      const sellW   = ((b.sell / maxVol) * barW).toFixed(1);
+      const buyW    = ((b.buy  / maxVol) * barW).toFixed(1);
+      const delta   = b.buy - b.sell;
+      const dc      = delta > 0 ? '#26a69a' : delta < 0 ? '#ef5350' : '#aaa';
+      const bg      = isPOC ? 'rgba(255,193,7,0.08)' : isCur ? 'rgba(255,255,255,0.04)' : 'transparent';
+      const badge   = isPOC ? ' <span style="font-size:9px;background:#f9a825;color:#000;padding:0 3px;border-radius:2px">POC</span>' : '';
+      const curMark = isCur ? ' ◀' : '';
+      return `<div style="display:grid;grid-template-columns:80px 1fr 1fr 60px;gap:2px 4px;align-items:center;padding:1px 0;background:${bg};border-radius:2px">
+        <span style="font-family:monospace;font-size:10px">$${b.price.toLocaleString()}${badge}${curMark}</span>
+        <div style="display:flex;justify-content:flex-end;align-items:center;gap:3px">
+          <span style="color:#ef5350;font-size:10px">${b.sell.toFixed(2)}</span>
+          <div style="height:8px;width:${sellW}px;background:rgba(239,83,80,0.6);border-radius:1px"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:3px">
+          <div style="height:8px;width:${buyW}px;background:rgba(38,166,154,0.6);border-radius:1px"></div>
+          <span style="color:#26a69a;font-size:10px">${b.buy.toFixed(2)}</span>
+        </div>
+        <span style="color:${dc};font-family:monospace;font-size:10px">${delta>=0?'+':''}${delta.toFixed(2)}</span>
+      </div>`;
+    }).join('');
+
+    body.innerHTML = headerHtml + rowsHtml;
+  } catch(e) {
+    body.innerHTML = `<div style="color:#ef5350;padding:16px">请求失败: ${e.message}</div>`;
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -760,6 +878,196 @@ function updateMobileAnalysis(tf) {
 }
 
 /* ══════════════════════════════════════════════════════
+   资金费率背离检测
+══════════════════════════════════════════════════════ */
+function detectFRDivergence(funding, rd) {
+  const hist = funding?.historical || [];
+  if (hist.length < 20 || !rd) return null;
+  const rates       = hist.map(h => h.rate);
+  const prev10Avg   = rates.slice(-20,-10).reduce((a,b)=>a+b,0)/10;
+  const recent10Avg = rates.slice(-10).reduce((a,b)=>a+b,0)/10;
+  const frDelta     = recent10Avg - prev10Avg;
+  const allTimeMax  = Math.max(...rates);
+  const recentMax   = Math.max(...rates.slice(-10));
+  const techScore   = rd.score || 0;
+  if (techScore >= 3 && frDelta < -0.003) {
+    return { type:'bearish', title:'⚠️ 资金费率顶背离',
+      desc:`价格走强但资金费率近10期均值从 ${prev10Avg.toFixed(4)}% 降至 ${recent10Avg.toFixed(4)}%，多头动能衰竭，警惕回调` };
+  }
+  if (techScore >= 3 && allTimeMax > 0.05 && recentMax < allTimeMax * 0.6) {
+    return { type:'bearish', title:'⚠️ 资金费率峰值背离',
+      desc:`价格强势但本轮费率峰值 ${recentMax.toFixed(4)}% 远低于历史高点 ${allTimeMax.toFixed(4)}%，多头排列弱于前次` };
+  }
+  if (techScore <= -3 && frDelta > 0.003) {
+    return { type:'bullish', title:'✅ 资金费率底背离',
+      desc:`价格下跌但资金费率近10期均值从 ${prev10Avg.toFixed(4)}% 升至 ${recent10Avg.toFixed(4)}%，空头动能减弱，关注反弹` };
+  }
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════
+   OI 突破验证信号
+══════════════════════════════════════════════════════ */
+function getOIBreakoutSignal(funding, rd) {
+  const oiA = funding?.oi_analysis;
+  if (!oiA || !rd) return null;
+  const oiUp = oiA.change_pct >=  2;
+  const oiDn = oiA.change_pct <= -2;
+  const bull = (rd.score||0) >= 3;
+  const bear = (rd.score||0) <= -3;
+  if (bull && oiUp) return { label:'✅ 真突破',    color:'#26a69a', score:+1,
+    desc:`价格↑ + 持仓量↑(+${oiA.change_pct}%) = 新资金入场，突破可信` };
+  if (bull && oiDn) return { label:'⚠️ 轧空行情', color:'#ff9800', score: 0,
+    desc:`价格↑ + 持仓量↓(${oiA.change_pct}%) = 空头止损推动，不可持续，警惕回调` };
+  if (bear && oiUp) return { label:'🔻 真跌破',    color:'#ef5350', score:-1,
+    desc:`价格↓ + 持仓量↑(+${oiA.change_pct}%) = 空单新开，下跌趋势确认` };
+  if (bear && oiDn) return { label:'📍 多头离场', color:'#f9a825', score: 0,
+    desc:`价格↓ + 持仓量↓(${oiA.change_pct}%) = 多头止损离场，可能接近短期底部` };
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════
+   市场机制徽章（ADX + 波动率自适应）
+══════════════════════════════════════════════════════ */
+function buildRegimeBadge(rd) {
+  const reg = rd.regime;
+  if (!reg || !reg.type) return '';
+  const typeMap = {
+    trending:     ['📈 趋势市', '#26a69a', '顺势交易 · 禁用逆势RSI/KDJ信号'],
+    ranging:      ['〰️ 震荡市', '#f9a825', '高抛低吸 · 禁用MA突破信号'],
+    transitional: ['🔄 过渡区', '#78909c', 'ADX中性 · 谨慎观望'],
+    unknown:      ['❓ 未知',   '#555',    '数据不足'],
+  };
+  const [label, color, tip] = typeMap[reg.type] || typeMap.unknown;
+  const adxStr = reg.adx != null
+    ? `ADX ${reg.adx}  DI+${reg.di_plus??'—'}  DI-${reg.di_minus??'—'}` : '';
+  const volLabel = reg.high_vol ? '⚡高波动' : '💤低波动';
+  const volStr   = `${volLabel}(ATR P${Math.round((reg.atr_pct_rank||0)*100)})  BB±${reg.bb_dev}  RSI${reg.rsi_win}`;
+  return `
+    <div style="margin-bottom:8px">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+        <span style="background:${color}22;color:${color};border:1px solid ${color}55;
+                     padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700">${label}</span>
+        <span style="color:var(--text3);font-size:10px">${adxStr}</span>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:2px">${volStr}</div>
+      <div style="font-size:10px;color:${color};opacity:0.9">${tip}</div>
+    </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   多时间框架共振矩阵
+══════════════════════════════════════════════════════ */
+function buildMTFMatrix() {
+  const MTF_TFS = ['15m','1h','4h','8h','1d','1w'];
+  const available = MTF_TFS.filter(tf => analysisData[tf]);
+  if (available.length < 2) return '';
+
+  const cellColor = s => s >= 2 ? '#26a69a' : s === 1 ? '#4caf50'
+                       : s === -1 ? '#ff9800' : s <= -2 ? '#ef5350' : '#555';
+  const cellSym   = s => s >= 2 ? '▲▲' : s === 1 ? '▲' : s === -1 ? '▽' : s <= -2 ? '▽▽' : '—';
+
+  const indicators = [
+    { label: '均线',   getScore: rd => (rd.ma||[]).reduce((s,m) => s+(m.above?1:-1), 0) },
+    { label: 'RSI',    getScore: rd => rd.rsi?.score  ?? 0 },
+    { label: 'MACD',   getScore: rd => rd.macd?.score ?? 0 },
+    { label: 'KDJ',    getScore: rd => rd.kdj?.score  ?? 0 },
+    { label: '布林带', getScore: rd => rd.bb?.score   ?? 0 },
+    { label: 'OBV',    getScore: rd => rd.obv?.score  ?? 0 },
+    { label: 'CVD',    getScore: rd => rd.cvd?.score  ?? 0 },
+    { label: 'VWAP',   getScore: rd => rd.vwap ? (rd.vwap.above ? 1 : -1) : null },
+  ];
+
+  const bullCnt = {}, bearCnt = {};
+  available.forEach(tf => { bullCnt[tf] = 0; bearCnt[tf] = 0; });
+
+  // 表头（列标题可点击切换 TF）
+  let rows = `<tr>
+    <th style="padding:3px 4px;text-align:left;color:var(--text3);font-weight:400;font-size:10px">指标</th>
+    ${available.map(tf =>
+      `<th style="padding:3px 2px;text-align:center;color:var(--text3);font-size:10px;cursor:pointer;text-decoration:underline dotted"
+           onclick="switchTf('${tf}')">${TF_LABELS[tf]||tf}</th>`
+    ).join('')}
+  </tr>`;
+
+  // 综合得分行（显示原始数字）
+  rows += `<tr style="border-top:1px solid var(--border2)">
+    <td style="padding:3px 4px;color:var(--text2);font-size:10px">综合</td>
+    ${available.map(tf => {
+      const rd = analysisData[tf]?.rd;
+      if (!rd) return '<td style="text-align:center;color:#555;font-size:10px">—</td>';
+      const s = rd.score, mx = rd.max_score || 16;
+      const pct = s / mx;
+      const norm = pct >= 0.3 ? 2 : pct >= 0.1 ? 1 : pct <= -0.3 ? -2 : pct <= -0.1 ? -1 : 0;
+      if (norm > 0) bullCnt[tf]++; else if (norm < 0) bearCnt[tf]++;
+      return `<td style="text-align:center;color:${cellColor(norm)};font-weight:700;font-size:10px">${s>=0?'+':''}${s}</td>`;
+    }).join('')}
+  </tr>`;
+
+  // 各指标行
+  indicators.forEach(ind => {
+    rows += `<tr style="border-top:1px solid rgba(255,255,255,0.04)">
+      <td style="padding:3px 4px;color:var(--text2);font-size:10px">${ind.label}</td>
+      ${available.map(tf => {
+        const rd = analysisData[tf]?.rd;
+        if (!rd) return '<td style="text-align:center;color:#555;font-size:10px">—</td>';
+        const s = ind.getScore(rd);
+        if (s === null) return '<td style="text-align:center;color:#555;font-size:10px">—</td>';
+        if (s > 0) bullCnt[tf]++; else if (s < 0) bearCnt[tf]++;
+        return `<td style="text-align:center;color:${cellColor(s)};font-size:11px">${cellSym(s)}</td>`;
+      }).join('')}
+    </tr>`;
+  });
+
+  // 共振强度行
+  const convSymbol = (bull, bear) => {
+    const ratio = (bull - bear) / (bull + bear || 1);
+    if (ratio >= 0.7)  return ['↑↑↑','#26a69a'];
+    if (ratio >= 0.3)  return ['↑↑', '#4caf50'];
+    if (ratio >= 0.05) return ['↑',  '#8bc34a'];
+    if (ratio <= -0.7) return ['↓↓↓','#ef5350'];
+    if (ratio <= -0.3) return ['↓↓', '#f44336'];
+    if (ratio <= -0.05)return ['↓',  '#ff9800'];
+    return ['—','#555'];
+  };
+  rows += `<tr style="border-top:2px solid var(--border2)">
+    <td style="padding:3px 4px;color:var(--text3);font-size:10px;font-weight:600">共振</td>
+    ${available.map(tf => {
+      const [sym, col] = convSymbol(bullCnt[tf], bearCnt[tf]);
+      return `<td style="text-align:center;color:${col};font-weight:700;font-size:11px">${sym}</td>`;
+    }).join('')}
+  </tr>`;
+
+  // 共振结论文字
+  const bullTfs = available.filter(tf => bullCnt[tf] > bearCnt[tf]).length;
+  const bearTfs = available.filter(tf => bearCnt[tf] > bullCnt[tf]).length;
+  const n = available.length;
+  let summary, sumColor;
+  if      (bullTfs >= n * 0.7) { summary = `🟢 强多头共振：${bullTfs}/${n} 个时间框架偏多，高胜率做多环境`; sumColor = '#4caf50'; }
+  else if (bullTfs >= n * 0.5) { summary = `🟡 弱多头共振：多数时间框架偏多，短周期信号待确认`;           sumColor = '#f9a825'; }
+  else if (bearTfs >= n * 0.7) { summary = `🔴 强空头共振：${bearTfs}/${n} 个时间框架偏空，高胜率做空环境`; sumColor = '#ef5350'; }
+  else if (bearTfs >= n * 0.5) { summary = `🟠 弱空头共振：多数时间框架偏空，逢反弹关注做空机会`;          sumColor = '#ff9800'; }
+  else                          { summary = `⚪ 多空分歧：各周期信号不一致，等待共振确认再入场`;              sumColor = '#78909c'; }
+
+  const maxSide = Math.max(bullTfs, bearTfs);
+  const conf = maxSide >= n * 0.7 ? '高' : maxSide >= n * 0.5 ? '中' : '低';
+  const confColor = conf === '高' ? '#26a69a' : conf === '中' ? '#f9a825' : '#78909c';
+
+  return `
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🔀 多时间框架共振矩阵</span>
+      <span style="font-size:10px;color:${confColor};font-weight:600">共振强度: ${conf}</span>
+    </div>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table style="width:100%;border-collapse:collapse;min-width:200px">${rows}</table>
+    </div>
+    <div style="margin-top:8px;padding:6px 8px;background:rgba(255,255,255,0.03);border-radius:4px;font-size:11px;color:${sumColor};line-height:1.4">${summary}</div>
+    <div style="font-size:10px;color:var(--text3);margin-top:4px">↑点击时间框架标题可快速切换</div>
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
    资深交易员综合研判卡片
 ══════════════════════════════════════════════════════ */
 function buildComprehensiveOpinion(rd, funding) {
@@ -827,8 +1135,26 @@ function buildComprehensiveOpinion(rd, funding) {
       warnings.push(`当前费率处于近${fa.days||166}天历史 ${fa.percentile}% 分位（极低区间），空头拥挤度极高`);
   }
 
+  // ── FR 背离信号 ────────────────────────────────────
+  const frDiv = detectFRDivergence(funding, rd);
+  if (frDiv) {
+    if (frDiv.type === 'bearish') warnings.push(frDiv.title + '：' + frDiv.desc);
+    else                          bullFactors.push(frDiv.title + '：' + frDiv.desc);
+  }
+
+  // ── OI 突破验证信号 ────────────────────────────────
+  const oiSigForOpinion = getOIBreakoutSignal(funding, rd);
+  let oiScore = 0;
+  if (oiSigForOpinion) {
+    oiScore = oiSigForOpinion.score;
+    if (oiSigForOpinion.score > 0)       bullFactors.push(oiSigForOpinion.label + '：' + oiSigForOpinion.desc);
+    else if (oiSigForOpinion.score < 0)  warnings.push(oiSigForOpinion.label + '：' + oiSigForOpinion.desc);
+    else if (oiSigForOpinion.label.includes('轧空')) warnings.push(oiSigForOpinion.label + '：' + oiSigForOpinion.desc);
+    else                                  bullFactors.push(oiSigForOpinion.label + '：' + oiSigForOpinion.desc);
+  }
+
   // ── 综合判断
-  const compositeScore = techScore + frScore;
+  const compositeScore = techScore + frScore + oiScore;
   let levelColor, levelText, suggest;
   if      (compositeScore >= 8)  { levelColor='#26a69a'; levelText='强烈看多 🚀'; }
   else if (compositeScore >= 4)  { levelColor='#4caf50'; levelText='偏多 📈'; }
@@ -910,7 +1236,7 @@ function buildComprehensiveOpinion(rd, funding) {
 /* ══════════════════════════════════════════════════════
    资金费率详情卡片（含迷你折线图 + 百分位）
 ══════════════════════════════════════════════════════ */
-function buildFundingCard(funding) {
+function buildFundingCard(funding, rd = null) {
   if (!funding || funding.funding_rate == null) return '';
   const fr   = funding.funding_rate;
   const fa   = funding.analysis || {};
@@ -1011,6 +1337,75 @@ function buildFundingCard(funding) {
     nextStr = d.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
   }
 
+  // ── OI 趋势迷你图 ──────────────────────────────────
+  let oiChart = '';
+  const oiHist = funding.oi_history || [];
+  if (oiHist.length >= 5) {
+    const W=260, H=50, P=4;
+    const ois   = oiHist.map(h => h.oi);
+    const oiMin = Math.min(...ois), oiMax = Math.max(...ois);
+    const oiRange = oiMax - oiMin || 1;
+    const toYoi = v => H - P - ((v - oiMin) / oiRange) * (H - P*2);
+    const oiPts = ois.map((v,i) => {
+      const x = P + (i/(ois.length-1))*(W-P*2);
+      return `${x.toFixed(1)},${toYoi(v).toFixed(1)}`;
+    }).join(' ');
+    const oiLastPt = oiPts.split(' ').at(-1).split(',');
+    const oiA   = funding.oi_analysis || {};
+    const oiCol = oiA.change_pct >= 2 ? '#26a69a' : oiA.change_pct <= -2 ? '#ef5350' : '#78909c';
+    oiChart = `
+      <div style="margin:6px 0 2px">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-bottom:2px">
+          <span>持仓量趋势（近5天·4H）</span>
+          <span style="color:${oiCol}">${oiA.trend||''} ${oiA.change_pct!=null?(oiA.change_pct>=0?'+':'')+oiA.change_pct+'%':''}</span>
+        </div>
+        <svg width="${W}" height="${H}" style="display:block;max-width:100%;border-radius:3px">
+          <rect width="${W}" height="${H}" fill="rgba(255,255,255,0.03)" rx="3"/>
+          <polyline points="${oiPts}" fill="none" stroke="${oiCol}" stroke-width="1.5" stroke-linejoin="round" opacity="0.9"/>
+          <circle cx="${oiLastPt[0]}" cy="${oiLastPt[1]}" r="3" fill="${oiCol}"/>
+        </svg>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">${oiA.signal||''}</div>
+      </div>`;
+  }
+
+  // ── OI 突破信号 ────────────────────────────────────
+  const oiSig = getOIBreakoutSignal(funding, rd);
+  const oiSigHtml = oiSig ? `
+    <div style="margin-top:6px;padding:5px 8px;border-radius:4px;background:${oiSig.color}18;border-left:3px solid ${oiSig.color}">
+      <div style="font-size:11px;font-weight:600;color:${oiSig.color}">${oiSig.label}</div>
+      <div style="font-size:10px;color:var(--text2);margin-top:2px">${oiSig.desc}</div>
+    </div>` : '';
+
+  // ── FR 背离警报 ────────────────────────────────────
+  const frDiv = detectFRDivergence(funding, rd);
+  const frDivHtml = frDiv ? `
+    <div style="margin-top:6px;padding:5px 8px;border-radius:4px;background:${frDiv.type==='bearish'?'#ef535018':'#26a69a18'};border-left:3px solid ${frDiv.type==='bearish'?'#ef5350':'#26a69a'}">
+      <div style="font-size:11px;font-weight:600;color:${frDiv.type==='bearish'?'#ef5350':'#26a69a'}">${frDiv.title}</div>
+      <div style="font-size:10px;color:var(--text2);margin-top:2px">${frDiv.desc}</div>
+    </div>` : '';
+
+  // ── 清算密集区 ─────────────────────────────────────
+  const liqClusters = funding.liquidation_clusters || [];
+  let liqHTML = '';
+  if (liqClusters.length > 0) {
+    const currentPrice = rd?.price;
+    const rows = liqClusters.map(lc => {
+      const dist = currentPrice ? ((lc.price - currentPrice)/currentPrice*100).toFixed(2)+'%' : lc.dominant;
+      const icon = lc.dominant === '多头清算' ? '🔴' : '🟢';
+      return `<div style="display:flex;justify-content:space-between;font-size:10px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span>${icon} $${lc.price.toLocaleString()}</span>
+        <span style="color:var(--text3)">${lc.count}笔 ${lc.qty.toFixed(1)}张</span>
+        <span style="color:var(--text3)">${dist}</span>
+      </div>`;
+    }).join('');
+    liqHTML = `
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border2)">
+        <div style="font-size:10px;color:var(--text3);margin-bottom:4px">🔥 近24h清算密集区（Top 5）</div>
+        ${rows}
+        <div style="font-size:9px;color:var(--text3);margin-top:3px">🔴多头被爆仓 · 🟢空头被爆仓</div>
+      </div>`;
+  }
+
   return `
   <div class="card">
     <div class="card-title">💰 资金费率 · 市场情绪</div>
@@ -1043,6 +1438,10 @@ function buildFundingCard(funding) {
         <div style="font-size:12px;font-weight:600">${oiUsdt}</div>
       </div>
     </div>
+    ${oiChart}
+    ${oiSigHtml}
+    ${frDivHtml}
+    ${liqHTML}
   </div>`;
 }
 
@@ -1056,9 +1455,9 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
     maRows += `<tr><td style="font-weight:600">${m.name}</td><td style="color:#78909c">${m.desc}</td><td>${fmt(m.val)}</td><td style="color:${c}">${a} ${m.diff_pct >= 0?'+':''}${m.diff_pct.toFixed(2)}%</td></tr>`;
   });
   const srRows = (resistances||[]).map(r =>
-    `<tr><td style="color:var(--bear)">阻力</td><td>${fmt(r.price)}</td><td style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</td></tr>`
+    `<tr><td style="color:var(--bear)">阻力</td><td>${fmt(r.price)}</td><td style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</td><td>${srBadge(r.source)}</td></tr>`
   ).join('') + (supports||[]).map(s =>
-    `<tr><td style="color:var(--bull)">支撑</td><td>${fmt(s.price)}</td><td style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</td></tr>`
+    `<tr><td style="color:var(--bull)">支撑</td><td>${fmt(s.price)}</td><td style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</td><td>${srBadge(s.source)}</td></tr>`
   ).join('');
   const fibRows = (fib||[]).sort((a,b)=>b.price-a.price).map(f => {
     const near = f.near ? ' <span style="color:var(--neutral)">← 附近</span>' : '';
@@ -1071,8 +1470,10 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
   const maTotal = (rd.ma||[]).reduce((s,m) => s+(m.above?1:-1), 0);
   return `
     ${buildComprehensiveOpinion(rd, funding)}
+    ${buildMTFMatrix()}
     <div class="card">
       <div class="card-title">综合信号 [${TF_LABELS_FULL[tf]||tf}]</div>
+      ${buildRegimeBadge(rd)}
       <div class="overall-box" style="border-left-color:${oc}">
         <div class="overall-text" style="color:${oc}">${rd.overall}</div>
         <div class="score-bar">
@@ -1090,6 +1491,7 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
         <tr><td>MACD</td><td style="color:${C(rd.macd.score)}">${rd.macd.score>=0?'+':''}${rd.macd.score}</td></tr>
         <tr><td>KDJ</td><td style="color:${C(rd.kdj.score)}">${rd.kdj.score>=0?'+':''}${rd.kdj.score}</td></tr>
         <tr><td>OBV</td><td style="color:${C(rd.obv.score)}">${rd.obv.score>=0?'+':''}${rd.obv.score}</td></tr>
+        <tr><td>CVD</td><td style="color:${C(rd.cvd?.score??0)}">${(rd.cvd?.score??0)>=0?'+':''}${rd.cvd?.score??0}</td></tr>
         <tr style="font-weight:700;border-top:1px solid #2a2e39"><td>合计</td><td style="color:${oc}">${rd.score>=0?'+':''}${rd.score} / ${rd.max_score}</td></tr>
       </table>
     </div>
@@ -1124,6 +1526,25 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
       <div class="row"><span class="row-label">当前OBV</span><span class="row-val">${rd.obv.now.toLocaleString()}</span></div>
       <div class="row"><span class="row-label">趋势</span><span class="row-sig" style="color:${C(rd.obv.score)}">${rd.obv.trend}</span></div>
     </div>
+    ${rd.cvd ? `
+    <div class="card">
+      <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>CVD · 成交量差值 (主动吃单)</span>
+        <button onclick="showFootprint()" style="font-size:10px;padding:2px 7px;border-radius:4px;border:1px solid #26c6da;background:transparent;color:#26c6da;cursor:pointer">踏印图</button>
+      </div>
+      <div class="row"><span class="row-label">OFI (最后K)</span>
+        <span class="row-val" style="color:${rd.cvd.last_ofi>=0?'var(--bull)':'var(--bear)'}">
+          ${rd.cvd.last_ofi>=0?'+':''}${rd.cvd.last_ofi.toFixed(3)}
+          <span style="font-size:10px;color:var(--text3)">(${rd.cvd.last_ofi>=0?'买盘偏强':'卖盘偏强'})</span>
+        </span>
+      </div>
+      <div class="row"><span class="row-label">累计CVD</span>
+        <span class="row-val">${rd.cvd.last_cvd.toLocaleString('en-US',{maximumFractionDigits:0})}</span>
+      </div>
+      <div class="row"><span class="row-label">信号</span>
+        <span class="row-sig" style="color:${C(rd.cvd.score)}">${rd.cvd.signal}</span>
+      </div>
+    </div>` : ''}
     ${rd.vwap ? `
     <div class="card">
       <div class="card-title">VWAP · 成交量加权均价</div>
@@ -1145,10 +1566,10 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
         <span class="row-label" style="color:var(--text3);font-size:11px">止损 = 当前价 ± 1.5 × ATR</span>
       </div>
     </div>` : ''}
-    ${buildFundingCard(funding)}
+    ${buildFundingCard(funding, rd)}
     <div class="card">
       <div class="card-title">支撑 / 阻力位</div>
-      <table><tr><th>类型</th><th>价格</th><th>距当前</th></tr>${srRows}</table>
+      <table><tr><th>类型</th><th>价格</th><th>距当前</th><th>来源</th></tr>${srRows}</table>
     </div>
     <div class="card">
       <div class="card-title">Fibonacci 回调位</div>
@@ -1162,6 +1583,8 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding) {
 function updateMobileSignals() {
   const panel = document.getElementById('panel-signals');
   if (!panel) return;
+  // 多时间框架共振矩阵（置于信号面板顶部）
+  const matrixHTML = buildMTFMatrix();
   // 多周期信号 Grid
   let gridHTML = '<div class="signals-grid">';
   TF_LIST.forEach(tf => {
@@ -1190,11 +1613,11 @@ function updateMobileSignals() {
   if (cur) {
     srHTML = `<div class="sr-section">
       <h3>当前周期 [${TF_LABELS_FULL[currentTf]||currentTf}] 支撑/阻力</h3>
-      ${(cur.resistances||[]).map(r=>`<div class="sr-row"><span style="color:var(--bear)">阻力</span><span>${fmt(r.price)}</span><span style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</span></div>`).join('')}
-      ${(cur.supports||[]).map(s=>`<div class="sr-row"><span style="color:var(--bull)">支撑</span><span>${fmt(s.price)}</span><span style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</span></div>`).join('')}
+      ${(cur.resistances||[]).map(r=>`<div class="sr-row"><span style="color:var(--bear)">阻力</span><span>${fmt(r.price)}</span><span style="color:var(--bear)">+${r.dist_pct.toFixed(2)}%</span>${srBadge(r.source)}</div>`).join('')}
+      ${(cur.supports||[]).map(s=>`<div class="sr-row"><span style="color:var(--bull)">支撑</span><span>${fmt(s.price)}</span><span style="color:var(--bull)">-${s.dist_pct.toFixed(2)}%</span>${srBadge(s.source)}</div>`).join('')}
     </div>`;
   }
-  panel.innerHTML = gridHTML + srHTML;
+  panel.innerHTML = matrixHTML + gridHTML + srHTML;
 }
 
 /* ══════════════════════════════════════════════════════
@@ -1285,7 +1708,12 @@ function renderDesktopChart(candles, supports, resistances, fib, tf) {
   const T = candles.map(c=>c.t), O=candles.map(c=>c.o), H=candles.map(c=>c.h);
   const L = candles.map(c=>c.l), C=candles.map(c=>c.c), V=candles.map(c=>c.v);
   const get = key => noNaN(candles.map(c=>c[key]));
-  const volColors      = candles.map(c=>c.c>=c.o?'#26a69a':'#ef5350');
+  // OFI 染色：用主动买卖比例（ofi）替代K线涨跌色，强度反映失衡程度
+  const volColors = candles.map(c => {
+    const o = c.ofi != null ? c.ofi : (c.c >= c.o ? 0.5 : -0.5);
+    const a = (0.35 + 0.55 * Math.abs(o)).toFixed(2);
+    return o >= 0 ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
+  });
   const macdHistColors = candles.map(c=>(c.macd_hist||0)>=0?'#26a69a':'#ef5350');
 
   const [yMin, yMax] = calcYRange(candles);
@@ -1309,8 +1737,10 @@ function renderDesktopChart(candles, supports, resistances, fib, tf) {
     {type:'scatter',x:T,y:get('vwap'),name:'VWAP',line:{color:'#ff9800',width:1.5,dash:'dashdot'},xaxis:'x',yaxis:'y'},
     {type:'scatter',x:T,y:get('atr_sl_long'), name:'ATR止多',line:{color:'rgba(38,166,154,0.6)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
     {type:'scatter',x:T,y:get('atr_sl_short'),name:'ATR止空',line:{color:'rgba(239,83,80,0.6)',width:1,dash:'dot'},xaxis:'x',yaxis:'y',showlegend:true},
-    {type:'bar',x:T,y:V,name:'成交量',marker:{color:volColors},xaxis:'x2',yaxis:'y2',showlegend:false,opacity:0.75},
-    {type:'scatter',x:T,y:get('obv'),name:'OBV',line:{color:'#ffb300',width:1.5},xaxis:'x3',yaxis:'y3'},
+    {type:'bar',x:T,y:V,name:'成交量(OFI色)',marker:{color:volColors},xaxis:'x2',yaxis:'y2',showlegend:false,opacity:0.85},
+    // CVD 替代 OBV：CVD 使用真实吃单数据，比 OBV 更准确
+    {type:'scatter',x:T,y:get('cvd'),name:'CVD',line:{color:'#26c6da',width:1.5},xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',x:T,y:get('obv'),name:'OBV',line:{color:'#ffb300',width:1,dash:'dot',opacity:0.5},xaxis:'x3',yaxis:'y3',showlegend:false},
     {type:'bar',x:T,y:get('macd_hist'),name:'MACD柱',marker:{color:macdHistColors},xaxis:'x4',yaxis:'y4',showlegend:false},
     {type:'scatter',x:T,y:get('macd'),       name:'MACD',  line:{color:'#29b6f6',width:1.5},xaxis:'x4',yaxis:'y4'},
     {type:'scatter',x:T,y:get('macd_signal'),name:'Signal',line:{color:'#ff7043',width:1.5},xaxis:'x4',yaxis:'y4'},
@@ -1335,7 +1765,7 @@ function renderDesktopChart(candles, supports, resistances, fib, tf) {
     xaxis6:{domain:[0,1],anchor:'y6',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x'},
     yaxis: {domain:[0.50,1.00],range:[yMin,yMax],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',tickformat:',.0f'},
     yaxis2:{domain:[0.40,0.49],showgrid:false,gridcolor:'#1e2130',zeroline:false,side:'right',showticklabels:false},
-    yaxis3:{domain:[0.30,0.39],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',tickformat:'.3s',title:{text:'OBV',font:{size:9,color:'#546e7a'}}},
+    yaxis3:{domain:[0.30,0.39],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right',tickformat:'.3s',title:{text:'CVD',font:{size:9,color:'#26c6da'}}},
     yaxis4:{domain:[0.20,0.29],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right'},
     yaxis5:{domain:[0.11,0.19],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
     yaxis6:{domain:[0.01,0.09],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100]},
@@ -1355,7 +1785,11 @@ function renderMainChart(candles, supports, resistances, fib, tf) {
   const T=candles.map(c=>c.t), O=candles.map(c=>c.o), H=candles.map(c=>c.h);
   const L=candles.map(c=>c.l), C=candles.map(c=>c.c), V=candles.map(c=>c.v);
   const get = key => noNaN(candles.map(c=>c[key]));
-  const volColors = candles.map(c=>c.c>=c.o?'#26a69a':'#ef5350');
+  const volColors = candles.map(c => {
+    const o = c.ofi != null ? c.ofi : (c.c >= c.o ? 0.5 : -0.5);
+    const a = (0.35 + 0.55 * Math.abs(o)).toFixed(2);
+    return o >= 0 ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
+  });
 
   const [yMin, yMax] = calcYRange(candles);
   const { shapes, anns } = buildSRShapes(candles, supports, resistances, fib, [yMin, yMax]);
@@ -1395,7 +1829,7 @@ function renderMainChart(candles, supports, resistances, fib, tf) {
 }
 
 /* ══════════════════════════════════════════════════════
-   手机端副图：MACD + RSI + KDJ（3面板）
+   手机端副图：MACD + RSI + KDJ + CVD（4面板）
 ══════════════════════════════════════════════════════ */
 function renderSubChart(candles) {
   const el = document.getElementById('chart-sub');
@@ -1403,6 +1837,8 @@ function renderSubChart(candles) {
   const T = candles.map(c=>c.t);
   const get = key => noNaN(candles.map(c=>c[key]));
   const macdHistColors = candles.map(c=>(c.macd_hist||0)>=0?'#26a69a':'#ef5350');
+  // CVD delta 柱颜色
+  const deltaColors = candles.map(c => (c.delta||0) >= 0 ? 'rgba(38,166,154,0.7)' : 'rgba(239,83,80,0.7)');
   const x0 = T[0], x1 = T[T.length-1];
 
   const shapes = [
@@ -1420,6 +1856,9 @@ function renderSubChart(candles) {
     {type:'scatter',x:T,y:get('kdj_k'),       name:'K',     line:{color:'#66bb6a',width:1.2},xaxis:'x3',yaxis:'y3'},
     {type:'scatter',x:T,y:get('kdj_d'),       name:'D',     line:{color:'#ef5350',width:1.2},xaxis:'x3',yaxis:'y3'},
     {type:'scatter',x:T,y:get('kdj_j'),       name:'J',     line:{color:'#ffb300',width:1.2,dash:'dot'},xaxis:'x3',yaxis:'y3'},
+    // CVD 面板：Delta 柱 + CVD 累计线
+    {type:'bar',    x:T,y:get('delta'),name:'Delta',marker:{color:deltaColors},xaxis:'x4',yaxis:'y4',showlegend:false,opacity:0.8},
+    {type:'scatter',x:T,y:get('cvd'), name:'CVD', line:{color:'#26c6da',width:1.5},xaxis:'x4',yaxis:'y4'},
   ];
 
   const h = Math.max(el.clientHeight||500, 300);
@@ -1431,10 +1870,12 @@ function renderSubChart(candles) {
     legend:{orientation:'h',y:1.03,x:0,font:{size:10},bgcolor:'rgba(0,0,0,0)'},
     xaxis: {domain:[0,1],anchor:'y', showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',rangeslider:{visible:false},showticklabels:false},
     xaxis2:{domain:[0,1],anchor:'y2',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
-    xaxis3:{domain:[0,1],anchor:'y3',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x'},
-    yaxis: {domain:[0.68,1.00],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right',tickfont:{size:9},title:{text:'MACD',font:{size:9,color:'#546e7a'}}},
-    yaxis2:{domain:[0.35,0.63],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'RSI',font:{size:9,color:'#546e7a'}}},
-    yaxis3:{domain:[0.02,0.30],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'KDJ',font:{size:9,color:'#546e7a'}}},
+    xaxis3:{domain:[0,1],anchor:'y3',showgrid:true,gridcolor:'#1e2130',zeroline:false,matches:'x',showticklabels:false},
+    xaxis4:{domain:[0,1],anchor:'y4',showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',matches:'x'},
+    yaxis: {domain:[0.76,1.00],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right',tickfont:{size:9},title:{text:'MACD',font:{size:9,color:'#546e7a'}}},
+    yaxis2:{domain:[0.52,0.73],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'RSI',font:{size:9,color:'#546e7a'}}},
+    yaxis3:{domain:[0.28,0.49],showgrid:true,gridcolor:'#1e2130',zeroline:false,side:'right',range:[0,100],tickfont:{size:9},title:{text:'KDJ',font:{size:9,color:'#546e7a'}}},
+    yaxis4:{domain:[0.02,0.25],showgrid:true,gridcolor:'#1e2130',zeroline:true,zerolinecolor:'#2a2e39',side:'right',tickfont:{size:9},tickformat:'.3s',title:{text:'CVD',font:{size:9,color:'#26c6da'}}},
     shapes, hovermode:'x unified',
     hoverlabel:{bgcolor:'#1a2035',bordercolor:'#2a2e39',font:{size:11}},
   };

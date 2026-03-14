@@ -71,12 +71,56 @@ for s in SYMBOLS:
     _cache[s] = {
         "last_update": None,
         "next_update": None,
-        "updating": False,
-        "ready": False,
-        "timeframes": {}
+        "updating":    False,
+        "ready":       False,
+        "update_id":   0,
+        "timeframes":  {}
     }
 
 _lock = threading.Lock()
+_update_counter = 0   # 每完成一轮全量刷新后递增
+
+
+class _TokenBucket:
+    """线程安全令牌桶——全局 API 请求速率控制"""
+    def __init__(self, rate: float, capacity: int):
+        self._tokens   = float(capacity)
+        self._capacity = float(capacity)
+        self._rate     = rate          # 令牌/秒
+        self._ts       = time.monotonic()
+        self._lock     = threading.Lock()
+
+    def acquire(self, cost: int = 1):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(
+                    self._capacity,
+                    self._tokens + (now - self._ts) * self._rate
+                )
+                self._ts = now
+                if self._tokens >= cost:
+                    self._tokens -= cost
+                    return
+                wait = (cost - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+# 最多 5 次/秒，允许最多 10 次瞬间突发（远低于 Binance 2400 权重/分钟上限）
+_rate_limiter = _TokenBucket(rate=5.0, capacity=10)
+
+# 各时间框架 K 线数据的最短刷新间隔（秒）
+# 超短周期需实时性，长周期无需每 5 分钟重新拉取
+_TF_TTL = {
+    "15m":  300,   # 5  分钟（与 REFRESH_INTERVAL 一致，每次都刷新）
+    "30m":  300,
+    "1h":   600,   # 10 分钟：每隔一个 5 分钟周期才真正拉取
+    "2h":   600,
+    "4h":   900,   # 15 分钟
+    "8h":  1800,   # 30 分钟
+    "1d":  3600,   # 1  小时
+    "1w":  7200,   # 2  小时
+}
 
 
 def _safe(v):
@@ -89,14 +133,76 @@ def _safe(v):
         return None
 
 
-def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb):
+# 各时间框架对订单簿实时数据的相关性权重（越短越相关，日线/周线不使用）
+_OB_TF_WEIGHTS = {
+    "15m": 1.0, "30m": 1.0, "1h": 1.0,
+    "2h":  0.6, "4h":  0.6, "8h": 0.6,
+    "1d":  0.0, "1w":  0.0,
+}
+
+
+def fetch_ob_walls(symbol: str, depth_limit: int = 1000) -> list:
+    """
+    从 Binance 期货深度接口获取挂单墙。
+    返回 [(price, weight, side), ...] 列表，出错时返回 []。
+    weight 为档位相对中位数的倍率（由 run_single_tf 乘以 TF 权重后传入 find_support_resistance）。
+    """
+    try:
+        r = req.get(
+            "https://fapi.binance.com/fapi/v1/depth",
+            params={"symbol": symbol, "limit": depth_limit},
+            timeout=5,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[OB] fetch_ob_walls {symbol} 失败: {e}")
+        return []
+
+    walls = []
+    for side_key, side_label in [("bids", "orderbook_bid"), ("asks", "orderbook_ask")]:
+        raw = data.get(side_key, [])
+        if not raw:
+            continue
+        try:
+            sizes = sorted(float(e[1]) for e in raw)
+            if not sizes:
+                continue
+            median_sz = sizes[len(sizes) // 2]   # 中位数（无需 scipy/numpy）
+            if median_sz <= 0:
+                continue
+            for entry in raw:
+                price = float(entry[0])
+                size  = float(entry[1])
+                ratio = size / median_sz
+                if ratio >= 5:    # 超强挂单墙 → 基础权重 3.0
+                    walls.append((price, 3.0, side_label))
+                elif ratio >= 3:  # 中等挂单墙 → 基础权重 2.0
+                    walls.append((price, 2.0, side_label))
+        except Exception as e:
+            print(f"[OB] 解析 {side_label} 失败: {e}")
+    return walls
+
+
+def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb, ob_walls=None):
     """分析单个周期，返回 {rd, candles, supports, resistances, fib}"""
     df = fetch_data(symbol=symbol, interval=interval, limit=limit)
     if df.empty:
         return None
 
     df = calculate_indicators(df)
-    supports, resistances = find_support_resistance(df, lookback=sr_lb, pivot_n=sr_pn, cluster_pct=sr_cluster_pct)
+
+    # 构建当前时间框架的 OB 层位（乘以 TF 相关性权重）
+    ob_tf_factor = _OB_TF_WEIGHTS.get(interval, 0.0)
+    ob_levels = []
+    if ob_walls and ob_tf_factor > 0.0:
+        for ob_price, ob_weight, ob_side in ob_walls:
+            ob_levels.append((ob_price, round(ob_weight * ob_tf_factor, 2), ob_side))
+
+    supports, resistances = find_support_resistance(
+        df, lookback=sr_lb, pivot_n=sr_pn,
+        cluster_pct=sr_cluster_pct, ob_levels=ob_levels
+    )
     fib_levels, fib_high, fib_low = calculate_fibonacci(df, lookback=fib_lb)
 
     # 静默调用 generate_report（不打印到控制台）
@@ -111,7 +217,8 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
                 "rsi", "bb_upper", "bb_mid", "bb_lower",
                 "macd", "macd_signal", "macd_hist",
                 "kdj_k", "kdj_d", "kdj_j", "obv",
-                "vwap", "atr", "atr_sl_long", "atr_sl_short"]
+                "vwap", "atr", "atr_sl_long", "atr_sl_short",
+                "delta", "cvd", "ofi"]          # 主动成交量
     plot_df = df.tail(chart_show).reset_index(drop=True)
     candles = []
     for _, row in plot_df.iterrows():
@@ -128,9 +235,13 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
     return {
         "rd": rd,
         "candles": candles,
-        "supports":    [{"price": s[0], "dist_pct": round((price - s[0]) / price * 100, 2)}
+        "supports":    [{"price": s[0],
+                         "dist_pct": round((price - s[0]) / price * 100, 2),
+                         "source":   s[2] if len(s) > 2 else "pivot"}
                         for s in supports],
-        "resistances": [{"price": r[0], "dist_pct": round((r[0] - price) / price * 100, 2)}
+        "resistances": [{"price": r[0],
+                         "dist_pct": round((r[0] - price) / price * 100, 2),
+                         "source":   r[2] if len(r) > 2 else "pivot"}
                         for r in resistances],
         "fib": [{"label": k, "price": v,
                  "dist_pct": round((v - price) / price * 100, 2),
@@ -143,46 +254,95 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
 # 后台分析线程
 # ─────────────────────────────────────────────
 
+def _analyze_symbol(symbol: str) -> None:
+    """单个币种的完整分析任务；设计为可在线程池中并行运行。"""
+    with _lock:
+        _cache[symbol]["updating"] = True
+
+    print(f"[服务器] 正在分析 {symbol}...")
+    cur_tf   = _cache[symbol].get("timeframes", {})  # 当前缓存的各周期数据
+    new_tf   = {}
+    now_ts   = time.time()
+    skipped  = []
+    fetched  = []
+
+    # 判断是否有需要更新的短周期 TF（决定是否取 OB 数据，避免不必要的深度请求）
+    needs_ob = any(
+        now_ts - cur_tf.get(iv, {}).get("_fetched_at", 0) >= _TF_TTL.get(iv, 300)
+        for iv, *_ in TIMEFRAMES
+        if _OB_TF_WEIGHTS.get(iv, 0.0) > 0
+    )
+
+    ob_walls = []
+    if needs_ob:
+        _rate_limiter.acquire(2)   # depth 接口权重较重，消耗 2 个令牌
+        ob_walls = fetch_ob_walls(symbol)
+        if ob_walls:
+            print(f"[服务器] {symbol} OB 挂单墙: {len(ob_walls)} 个价格层")
+
+    for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
+        cached = cur_tf.get(interval, {})
+        age    = now_ts - cached.get("_fetched_at", 0)
+        ttl    = _TF_TTL.get(interval, 300)
+
+        if age < ttl:
+            # 数据仍在有效期内，直接复用，不消耗 API 配额
+            new_tf[interval] = cached
+            skipped.append(interval)
+            continue
+
+        _rate_limiter.acquire(1)   # 每次 K 线请求消耗 1 个令牌
+        try:
+            result = run_single_tf(symbol, interval, limit, label,
+                                   chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
+                                   ob_walls=ob_walls)
+            if result:
+                result["_fetched_at"] = now_ts
+                new_tf[interval] = result
+                fetched.append(interval)
+            elif cached:
+                new_tf[interval] = cached   # 失败时保留旧数据
+        except Exception as e:
+            print(f"[服务器] {symbol} {label} 分析失败: {e}")
+            if cached:
+                new_tf[interval] = cached
+
+    if skipped:
+        print(f"[服务器] {symbol} TTL 内跳过: {', '.join(skipped)}")
+    if fetched:
+        print(f"[服务器] {symbol} 已更新: {', '.join(fetched)}")
+
+    now = datetime.now()
+    with _lock:
+        _cache[symbol]["timeframes"]  = new_tf
+        _cache[symbol]["last_update"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        _cache[symbol]["updating"]    = False
+        _cache[symbol]["ready"]       = True
+
+    print(f"[服务器] {symbol} 完成")
+
+
 def analysis_worker():
-    global _cache
+    global _update_counter
+    from concurrent.futures import ThreadPoolExecutor
+
     while True:
         print(f"\n[服务器] ===== 开始更新分析数据 {datetime.now().strftime('%H:%M:%S')} =====")
-        
-        for symbol in SYMBOLS:
-            with _lock:
-                _cache[symbol]["updating"] = True
 
-            print(f"[服务器] 正在分析 {symbol}...")
-            new_tf = {}
+        # 并行分析所有币种（各币种独立无依赖，适合 I/O 密集型线程并行）
+        with ThreadPoolExecutor(max_workers=len(SYMBOLS)) as executor:
+            list(executor.map(_analyze_symbol, SYMBOLS))
 
-            for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
-                try:
-                    # print(f"  - 分析 {label} ({interval})...")
-                    result = run_single_tf(symbol, interval, limit, label,
-                                           chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb)
-                    if result:
-                        new_tf[interval] = result
-                        # score = result["rd"]["score"]
-                        # overall = result["rd"]["overall"].split("(")[0].strip()
-                        # print(f"    -> {overall} {score:+d}")
-                    time.sleep(0.1) # 稍微快一点
-                except Exception as e:
-                    print(f"[服务器] {symbol} {label} 分析失败: {e}")
-
-            now    = datetime.now()
-            next_t = now + timedelta(seconds=REFRESH_INTERVAL)
-
-            with _lock:
-                _cache[symbol]["timeframes"]  = new_tf
-                _cache[symbol]["last_update"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 全量完成后统一打版本戳 & next_update，确保跨币种时间戳一致
+        _update_counter += 1
+        now    = datetime.now()
+        next_t = now + timedelta(seconds=REFRESH_INTERVAL)
+        with _lock:
+            for symbol in SYMBOLS:
+                _cache[symbol]["update_id"]   = _update_counter
                 _cache[symbol]["next_update"] = next_t.strftime("%Y-%m-%d %H:%M:%S")
-                _cache[symbol]["updating"]    = False
-                _cache[symbol]["ready"]       = True
-            
-            print(f"[服务器] {symbol} 完成")
-            time.sleep(1) # 币种之间间隔
 
-        print(f"[服务器] 全部完成，下次更新: {next_t.strftime('%H:%M:%S')}\n")
+        print(f"[服务器] 全部完成 (update_id={_update_counter})，下次更新: {next_t.strftime('%H:%M:%S')}\n")
         time.sleep(REFRESH_INTERVAL)
 
 
@@ -214,12 +374,13 @@ def status():
         else:
             remaining = REFRESH_INTERVAL
         return jsonify({
-            "symbol":           symbol,
-            "last_update":      data.get("last_update"),
-            "next_update":      data.get("next_update"),
+            "symbol":            symbol,
+            "last_update":       data.get("last_update"),
+            "next_update":       data.get("next_update"),
             "seconds_remaining": remaining,
-            "updating":         data.get("updating", False),
-            "ready":            data.get("ready", False),
+            "updating":          data.get("updating", False),
+            "ready":             data.get("ready", False),
+            "update_id":         data.get("update_id", 0),
         })
 
 
@@ -244,6 +405,7 @@ def analysis():
             "symbol":      symbol,
             "ready":       data["ready"],
             "last_update": data["last_update"],
+            "update_id":   data.get("update_id", 0),
             "timeframes":  result,
         })
 
@@ -268,6 +430,89 @@ def klines(interval):
         })
 
 
+@app.route("/api/footprint/<interval>")
+def footprint(interval):
+    """获取最近 K 线的踏印数据（逐笔主动买卖量，按价格档位分桶）"""
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    if symbol not in _cache:
+        return jsonify({"error": "Invalid symbol"}), 400
+
+    with _lock:
+        tf_data = _cache[symbol]["timeframes"].get(interval)
+    if not tf_data:
+        return jsonify({"error": "数据未就绪，请稍候..."}), 404
+
+    candles = tf_data.get("candles", [])
+    if not candles:
+        return jsonify({"error": "无K线数据"}), 404
+
+    last = candles[-1]
+    TF_MS = {
+        "15m": 900_000,   "30m": 1_800_000,  "1h":  3_600_000,
+        "2h":  7_200_000, "4h":  14_400_000, "8h":  28_800_000,
+        "1d":  86_400_000,"1w":  604_800_000,
+    }
+    try:
+        t0       = datetime.strptime(last["t"], "%Y-%m-%dT%H:%M")
+        start_ms = int(t0.timestamp() * 1000)
+        end_ms   = start_ms + TF_MS.get(interval, 3_600_000) - 1
+    except Exception as e:
+        return jsonify({"error": f"时间解析失败: {e}"}), 500
+
+    _rate_limiter.acquire(2)
+    try:
+        r = req.get(
+            "https://api.binance.com/api/v3/aggTrades",
+            params={"symbol": symbol, "startTime": start_ms, "endTime": end_ms, "limit": 1000},
+            timeout=15,
+        )
+        trades = r.json()
+        if not isinstance(trades, list):
+            return jsonify({"error": "API 返回异常", "raw": trades}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # 动态档位大小（根据价格量级）
+    price = float(last["c"])
+    if   price > 50_000: bucket = 200.0
+    elif price > 10_000: bucket = 100.0
+    elif price >  1_000: bucket = 10.0
+    elif price >    100: bucket = 1.0
+    elif price >     10: bucket = 0.1
+    else:                bucket = 0.01
+
+    from collections import defaultdict
+    buckets = defaultdict(lambda: {"buy": 0.0, "sell": 0.0})
+    for tr in trades:
+        p = round(float(tr["p"]) / bucket) * bucket
+        q = float(tr["q"])
+        if tr["m"]:    # isBuyerMaker=True → 主动卖方（卖方吃单）
+            buckets[p]["sell"] += q
+        else:          # 主动买方（买方吃单）
+            buckets[p]["buy"] += q
+
+    result = sorted([
+        {"price": k,
+         "buy":   round(v["buy"],  4),
+         "sell":  round(v["sell"], 4),
+         "delta": round(v["buy"] - v["sell"], 4)}
+        for k, v in buckets.items()
+    ], key=lambda x: x["price"], reverse=True)
+
+    poc_price = max(result, key=lambda x: x["buy"] + x["sell"])["price"] if result else price
+
+    return jsonify({
+        "symbol":        symbol,
+        "interval":      interval,
+        "candle_time":   last["t"],
+        "current_price": price,
+        "bucket_size":   bucket,
+        "total_trades":  len(trades),
+        "poc_price":     poc_price,
+        "buckets":       result,
+    })
+
+
 @app.route("/api/price")
 def live_price():
     """实时价格 + 24h 统计"""
@@ -286,6 +531,60 @@ def live_price():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _analyze_oi(oi_history: list) -> dict:
+    """分析持仓量趋势：上升/下降幅度，用于判断突破真伪"""
+    if not oi_history or len(oi_history) < 5:
+        return {"trend": "unknown", "change_pct": 0.0, "signal": "数据不足"}
+    ois  = [o["oi"] for o in oi_history]
+    half = max(1, len(ois) // 2)
+    recent_avg = sum(ois[-half:]) / half
+    prev_avg   = sum(ois[:half])  / half
+    change_pct = (recent_avg - prev_avg) / prev_avg * 100 if prev_avg else 0
+    if   change_pct >=  5: trend, signal = "快速上升", "大量新仓入场"
+    elif change_pct >=  2: trend, signal = "温和上升", "持仓稳步增加"
+    elif change_pct <= -5: trend, signal = "快速下降", "大量旧仓平仓"
+    elif change_pct <= -2: trend, signal = "温和下降", "持仓缓慢减少"
+    else:                  trend, signal = "平稳",     "持仓量无明显变化"
+    return {
+        "trend":      trend,
+        "signal":     signal,
+        "change_pct": round(change_pct, 2),
+        "recent_avg": round(recent_avg, 0),
+        "oi_max":     round(max(ois), 0),
+        "oi_min":     round(min(ois), 0),
+    }
+
+
+def _cluster_liquidations(orders: list, bucket_size: float = 500.0) -> list:
+    """将强平订单按价格分桶，返回 Top-5 清算密集区"""
+    from collections import defaultdict
+    buckets = defaultdict(lambda: {"qty": 0.0, "count": 0, "long_qty": 0.0, "short_qty": 0.0})
+    for o in orders:
+        try:
+            price = float(o.get("averagePrice") or o.get("price", 0))
+            qty   = float(o.get("executedQty", 0))
+            side  = o.get("side", "")
+            key   = round(price / bucket_size) * bucket_size
+            buckets[key]["qty"]   += qty
+            buckets[key]["count"] += 1
+            if side == "SELL": buckets[key]["long_qty"]  += qty  # 多头被爆仓
+            else:              buckets[key]["short_qty"] += qty  # 空头被爆仓
+        except Exception:
+            continue
+    if not buckets:
+        return []
+    sorted_b = sorted(buckets.items(), key=lambda x: x[1]["qty"], reverse=True)[:5]
+    return [
+        {"price":     price,
+         "qty":       round(b["qty"], 2),
+         "count":     b["count"],
+         "long_qty":  round(b["long_qty"], 2),
+         "short_qty": round(b["short_qty"], 2),
+         "dominant":  "多头清算" if b["long_qty"] >= b["short_qty"] else "空头清算"}
+        for price, b in sorted_b
+    ]
 
 
 def _analyze_funding(rate_pct: float, history: list) -> dict:
@@ -379,14 +678,16 @@ def funding_data():
     """资金费率 + 持仓量（合约市场实时数据，含历史 + 情绪分析）"""
     symbol = request.args.get("symbol", "BTCUSDT")
     result = {
-        "symbol":            symbol,
-        "funding_rate":      None,
-        "next_funding_time": None,
-        "open_interest":     None,
-        "open_interest_usdt": None,
-        "historical":        [],   # 最近500期历史费率（≈166天）
-        "oi_history":        [],   # 持仓量历史
-        "analysis":          None, # 情绪分析结论
+        "symbol":               symbol,
+        "funding_rate":         None,
+        "next_funding_time":    None,
+        "open_interest":        None,
+        "open_interest_usdt":   None,
+        "historical":           [],   # 最近500期历史费率（≈166天）
+        "oi_history":           [],   # 持仓量历史
+        "analysis":             None, # 情绪分析结论
+        "oi_analysis":          None, # 持仓量趋势分析
+        "liquidation_clusters": [],   # 清算密集区 Top-5
     }
 
     # ── 历史资金费率（最近 500 期 ≈ 166 天，API 单次上限 1000）────────────────
@@ -454,6 +755,23 @@ def funding_data():
                 result["open_interest_usdt"] = round(
                     result["open_interest"] * mark_price, 2
                 )
+    except Exception:
+        pass
+
+    # ── OI 趋势分析 ──────────────────────────────────────
+    if result["oi_history"]:
+        result["oi_analysis"] = _analyze_oi(result["oi_history"])
+
+    # ── 近期清算密集区（最近 1000 笔强平）────────────────
+    try:
+        liq_r = req.get(
+            "https://fapi.binance.com/fapi/v1/allForceOrders",
+            params={"symbol": symbol, "limit": 1000},
+            timeout=8,
+        )
+        liq_list = liq_r.json()
+        if isinstance(liq_list, list):
+            result["liquidation_clusters"] = _cluster_liquidations(liq_list)
     except Exception:
         pass
 
