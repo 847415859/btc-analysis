@@ -24,6 +24,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import ta
 
+# 导入链上数据引擎
+try:
+    from onchain_engine import OnChainMonitor
+    onchain_monitor = OnChainMonitor()
+except ImportError:
+    onchain_monitor = None
+    print("[Warning] onchain_engine.py not found. On-chain analysis will be disabled.")
+
 # ─────────────────────────────────────────────
 # 周期配置
 # ─────────────────────────────────────────────
@@ -157,7 +165,7 @@ def fetch_data_extended(symbol: str = "BTCUSDT", interval: str = "1h",
 # B. 技术指标计算
 # ─────────────────────────────────────────────
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_indicators(df: pd.DataFrame, tf_interval: str = "") -> pd.DataFrame:
     """计算所有技术指标"""
     df["ma20"]  = ta.trend.sma_indicator(df["close"], window=20)
     df["ma50"]  = ta.trend.sma_indicator(df["close"], window=50)
@@ -188,13 +196,21 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     obv = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"])
     df["obv"] = obv.on_balance_volume()
 
-    # ── VWAP（按日重置）──────────────────────────────
+    # ── VWAP ────────────────────────────────────────
+    # 日线/周线：每根K线即一个交易日，按日重置的VWAP退化为典型价，
+    # 改用20期滚动VWAP（类似VWAP锚定于近期成交重心）
     tp = (df["high"] + df["low"] + df["close"]) / 3
-    dates = df["date"].dt.date
-    df["vwap"] = (
-        (tp * df["volume"]).groupby(dates).cumsum()
-        / df["volume"].groupby(dates).cumsum()
-    )
+    if tf_interval in ("1d", "1w"):
+        df["vwap"] = (
+            (tp * df["volume"]).rolling(20, min_periods=1).sum()
+            / df["volume"].rolling(20, min_periods=1).sum()
+        )
+    else:
+        dates = df["date"].dt.date
+        df["vwap"] = (
+            (tp * df["volume"]).groupby(dates).cumsum()
+            / df["volume"].groupby(dates).cumsum()
+        )
 
     # ── ATR(14) + 止损线（1.5×ATR）────────────────────
     atr_ind = ta.volatility.AverageTrueRange(
@@ -252,7 +268,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5,
                              cluster_pct: float = 0.015, ob_levels: list = None,
-                             liq_levels: list = None):
+                             liq_levels: list = None,
+                             vp_data: dict = None, fvg_zones: list = None):
     recent = df.tail(lookback).copy()
     current_price = df["close"].iloc[-1]
 
@@ -304,7 +321,37 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             if 0.8 * current_price <= ob_price <= 1.2 * current_price:
                 raw_levels.append((ob_price, ob_weight, ob_side))
 
-    # 4. 清算密集区（来自 WebSocket 累积或 OI 估算）
+    # 4. Volume Profile 节点（POC 权重最高 = 机构真实价值共识）
+    if vp_data:
+        poc = vp_data.get("poc")
+        vah = vp_data.get("vah")
+        val = vp_data.get("val")
+        if poc and 0.8 * current_price <= poc <= 1.2 * current_price:
+            raw_levels.append((poc, 3.5, "vp_poc"))   # POC：最高权重
+        if vah and 0.8 * current_price <= vah <= 1.2 * current_price:
+            raw_levels.append((vah, 2.5, "vp_vah"))
+        if val and 0.8 * current_price <= val <= 1.2 * current_price:
+            raw_levels.append((val, 2.5, "vp_val"))
+        for node in (vp_data.get("hvn") or [])[:3]:
+            np_ = node.get("price", 0)
+            if np_ and 0.85 * current_price <= np_ <= 1.15 * current_price:
+                raw_levels.append((np_, 1.8, "vp_hvn"))
+
+    # 5. Fair Value Gap（FVG 中点和边界作为高精度 S/R）
+    if fvg_zones:
+        for fvg in fvg_zones[:6]:
+            mp = fvg.get("mid", 0)
+            bp = fvg["bottom"]; tp = fvg["top"]
+            fvg_src = "fvg_bull" if fvg["type"] == "bullish_fvg" else "fvg_bear"
+            # 中点是机构挂单核心价格，权重最高
+            if mp and 0.85 * current_price <= mp <= 1.15 * current_price:
+                raw_levels.append((mp, 2.5, fvg_src))
+            # 缺口边界作为次级 S/R
+            for edge in [bp, tp]:
+                if edge and 0.85 * current_price <= edge <= 1.15 * current_price:
+                    raw_levels.append((edge, 1.5, fvg_src))
+
+    # 6. 清算密集区（来自 WebSocket 累积或 OI 估算）
     # 多头清算区 → 价格下方潜在支撑（多头止损密集，一旦触及会产生大量卖压，但也是空方目标位）
     # 空头清算区 → 价格上方潜在阻力（空头止损密集，轧空后变为强支撑）
     # 权重 2.5：介于订单簿(2-3)和成交量节点(2)之间，反映其真实的价格磁吸效应
@@ -371,6 +418,16 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             reason_parts.append("多头清算密集区（强平踩踏风险）")
         if "liq_short" in parts:
             reason_parts.append("空头清算密集区（轧空加速点）")
+        if "vp_poc" in parts:
+            reason_parts.append("成交量POC（市场真实价值共识点）")
+        if any(p in ("vp_vah", "vp_val") for p in parts):
+            reason_parts.append("成交量价值区间边界(VAH/VAL)")
+        if "vp_hvn" in parts:
+            reason_parts.append("高成交量节点(HVN)")
+        if "fvg_bull" in parts:
+            reason_parts.append("看涨价格失衡区(FVG↑)——回调磁吸")
+        if "fvg_bear" in parts:
+            reason_parts.append("看跌价格失衡区(FVG↓)——反弹磁吸")
 
         # 多源叠加说明
         n_sources = len(parts)
@@ -411,6 +468,415 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
 
 
 # ─────────────────────────────────────────────
+# C-2. Volume Profile（VPVR · POC / VAH / VAL）
+# ─────────────────────────────────────────────
+
+def calculate_volume_profile(df: pd.DataFrame, lookback: int = 300,
+                              num_bins: int = 100) -> dict:
+    """
+    计算成交量分布（Volume Profile Visible Range）
+    POC = 成交量最密集价格 → 市场真实价值共识点
+    VAH / VAL = 含70%成交量的价值区间上/下沿
+    HVN = 高成交量节点，次级 S/R
+    """
+    recent = df.tail(lookback)
+    if len(recent) < 10:
+        return {}
+    price_min = float(recent["low"].min())
+    price_max = float(recent["high"].max())
+    if price_max <= price_min:
+        return {}
+
+    span     = (price_max - price_min) / num_bins
+    bins     = np.linspace(price_min, price_max, num_bins + 1)
+    bin_ctrs = (bins[:-1] + bins[1:]) / 2
+    bin_vol  = np.zeros(num_bins)
+
+    for _, row in recent.iterrows():
+        lo, hi, vol = float(row["low"]), float(row["high"]), float(row["volume"])
+        if hi <= lo or vol <= 0 or span == 0:
+            continue
+        idx_lo = max(0,          int((lo - price_min) / span))
+        idx_hi = min(num_bins-1, int((hi - price_min) / span))
+        n_span = max(1, idx_hi - idx_lo + 1)
+        bin_vol[idx_lo : idx_hi + 1] += vol / n_span
+
+    poc_idx = int(np.argmax(bin_vol))
+    poc     = float(bin_ctrs[poc_idx])
+
+    # Value Area：以 POC 为核心向两侧扩展至 70% 总量
+    total_vol  = float(bin_vol.sum())
+    target_vol = total_vol * 0.70
+    va_lo = va_hi = poc_idx
+    va_vol = float(bin_vol[poc_idx])
+
+    while va_vol < target_vol and (va_lo > 0 or va_hi < num_bins - 1):
+        nxt_lo = float(bin_vol[va_lo - 1]) if va_lo > 0          else -1.0
+        nxt_hi = float(bin_vol[va_hi + 1]) if va_hi < num_bins-1 else -1.0
+        if nxt_lo >= nxt_hi and va_lo > 0:
+            va_lo -= 1;  va_vol += bin_vol[va_lo]
+        elif va_hi < num_bins - 1:
+            va_hi += 1;  va_vol += bin_vol[va_hi]
+        else:
+            break
+
+    val = float(bins[va_lo])
+    vah = float(bins[va_hi + 1])
+    va_width_pct = (vah - val) / poc * 100 if poc else 0
+
+    sorted_idx = np.argsort(bin_vol)[::-1]
+    hvn = []
+    for idx in sorted_idx:
+        if idx == poc_idx:
+            continue
+        hvn.append({"price": round(float(bin_ctrs[idx]), 2),
+                    "vol_pct": round(float(bin_vol[idx] / total_vol * 100), 1)})
+        if len(hvn) >= 5:
+            break
+
+    if   va_width_pct > 8: dist_type = "分散型（无明显共识）"
+    elif va_width_pct < 3: dist_type = "集中型（强价值共识）"
+    else:                  dist_type = "均衡型"
+
+    current_price = float(df["close"].iloc[-1])
+    max_vol       = float(bin_vol.max()) or 1.0
+    top_idxs      = np.argsort(bin_vol)[::-1][:20]
+    chart_bins    = sorted([
+        {"price":   round(float(bin_ctrs[i]), 2),
+         "vol_pct": round(float(bin_vol[i] / total_vol * 100), 1),
+         "bar_pct": round(float(bin_vol[i] / max_vol * 100),   1)}
+        for i in top_idxs
+    ], key=lambda x: x["price"], reverse=True)
+
+    return {
+        "poc":          round(poc, 2),
+        "vah":          round(vah, 2),
+        "val":          round(val, 2),
+        "va_width_pct": round(va_width_pct, 2),
+        "dist_type":    dist_type,
+        "poc_above":    poc > current_price,
+        "hvn":          hvn,
+        "chart_bins":   chart_bins,
+    }
+
+
+# ─────────────────────────────────────────────
+# C-3. Fair Value Gap（价格失衡区 / FVG）
+# ─────────────────────────────────────────────
+
+def detect_fair_value_gaps(df: pd.DataFrame,
+                            min_gap_pct:     float = 0.002,
+                            max_age_bars:    int   = 150,
+                            price_range_pct: float = 0.15) -> list:
+    """
+    识别价格失衡区（Fair Value Gap）
+    Bullish FVG: K[i].low  > K[i-2].high  → 向上缺口，回调时强支撑
+    Bearish FVG: K[i].high < K[i-2].low   → 向下缺口，反弹时强阻力
+    机构惯于在 FVG 中点挂单等待价格回填，回填概率 >60%。
+    """
+    n = len(df)
+    if n < 3:
+        return []
+
+    current_price = float(df["close"].iloc[-1])
+    lo_bound      = current_price * (1 - price_range_pct)
+    hi_bound      = current_price * (1 + price_range_pct)
+    scan_start    = max(2, n - max_age_bars - 2)
+
+    fvgs = []
+    for i in range(scan_start, n):
+        h0 = float(df["high"].iloc[i - 2]);  l0 = float(df["low"].iloc[i - 2])
+        h2 = float(df["high"].iloc[i]);       l2 = float(df["low"].iloc[i])
+        d2 = df["date"].iloc[i];              age = n - i
+
+        # Bullish FVG
+        if l2 > h0:
+            gap_pct = (l2 - h0) / h0
+            if gap_pct >= min_gap_pct:
+                top, bot = l2, h0;  mid = (top + bot) / 2
+                fp = 0.0
+                if i < n - 1:
+                    post_lo = float(df["low"].iloc[i + 1:].min())
+                    if   post_lo <= bot:  fp = 100.0
+                    elif post_lo < top:   fp = (top - post_lo) / (top - bot) * 100
+                if fp < 90 and lo_bound <= mid <= hi_bound:
+                    fvgs.append({
+                        "type": "bullish_fvg", "top": round(top, 2),
+                        "bottom": round(bot, 2), "mid": round(mid, 2),
+                        "size_pct": round(gap_pct * 100, 3), "age_bars": age,
+                        "formed_at": str(d2)[:16], "filled_pct": round(fp, 1),
+                        "direction": "support",
+                        "desc": f"FVG↑ ${bot:,.0f}–${top:,.0f} ({gap_pct*100:.2f}%)，{age}根前，已填{fp:.0f}%",
+                    })
+
+        # Bearish FVG
+        if h2 < l0:
+            gap_pct = (l0 - h2) / l0
+            if gap_pct >= min_gap_pct:
+                top, bot = l0, h2;  mid = (top + bot) / 2
+                fp = 0.0
+                if i < n - 1:
+                    post_hi = float(df["high"].iloc[i + 1:].max())
+                    if   post_hi >= top:  fp = 100.0
+                    elif post_hi > bot:   fp = (post_hi - bot) / (top - bot) * 100
+                if fp < 90 and lo_bound <= mid <= hi_bound:
+                    fvgs.append({
+                        "type": "bearish_fvg", "top": round(top, 2),
+                        "bottom": round(bot, 2), "mid": round(mid, 2),
+                        "size_pct": round(gap_pct * 100, 3), "age_bars": age,
+                        "formed_at": str(d2)[:16], "filled_pct": round(fp, 1),
+                        "direction": "resistance",
+                        "desc": f"FVG↓ ${bot:,.0f}–${top:,.0f} ({gap_pct*100:.2f}%)，{age}根前，已填{fp:.0f}%",
+                    })
+
+    fvgs.sort(key=lambda x: abs(x["mid"] - current_price))
+    return fvgs[:8]
+
+
+# ─────────────────────────────────────────────
+# C-4. Market Structure（BOS + CHoCH）
+# ─────────────────────────────────────────────
+
+def detect_market_structure(df: pd.DataFrame,
+                             pivot_n: int = 3,
+                             lookback: int = 150) -> dict:
+    """
+    识别市场结构：BOS（结构突破）和 CHoCH（性质改变）
+    多头结构 (HH+HL)：顺势做多  |  空头结构 (LH+LL)：顺势做空
+    BOS = 沿趋势突破摆动高/低点（延续）
+    CHoCH = 逆趋势突破摆动低/高点（转变预警）
+    """
+    recent = df.tail(lookback).reset_index(drop=True)
+    n      = len(recent)
+
+    _empty = {
+        "structure": "unknown", "structure_cn": "数据不足",
+        "structure_score": 0,   "trading_bias": "数据不足",
+        "events": [], "key_high": None, "key_low": None,
+        "swing_highs": [], "swing_lows": [],
+    }
+    if n < pivot_n * 4 + 2:
+        return _empty
+
+    highs, lows = [], []
+    for i in range(pivot_n, n - pivot_n):
+        ph = float(recent["high"].iloc[i])
+        pl = float(recent["low"].iloc[i])
+        if ph == float(recent["high"].iloc[i - pivot_n : i + pivot_n + 1].max()):
+            highs.append({"price": ph, "date": recent["date"].iloc[i], "idx": i})
+        if pl == float(recent["low"].iloc[i - pivot_n : i + pivot_n + 1].min()):
+            lows.append({"price": pl,  "date": recent["date"].iloc[i], "idx": i})
+
+    if len(highs) < 2 or len(lows) < 2:
+        return {**_empty, "structure_cn": "摆动点不足"}
+
+    last_sh, prev_sh = highs[-1], highs[-2]
+    last_sl, prev_sl = lows[-1],  lows[-2]
+    hh = last_sh["price"] > prev_sh["price"];  hl = last_sl["price"] > prev_sl["price"]
+    lh = last_sh["price"] < prev_sh["price"];  ll = last_sl["price"] < prev_sl["price"]
+
+    if len(highs) >= 3 and len(lows) >= 3:
+        sh3, sl3 = highs[-3], lows[-3]
+        hh_s = (1 if hh else 0) + (1 if prev_sh["price"] > sh3["price"] else 0)
+        hl_s = (1 if hl else 0) + (1 if prev_sl["price"] > sl3["price"] else 0)
+        lh_s = (1 if lh else 0) + (1 if prev_sh["price"] < sh3["price"] else 0)
+        ll_s = (1 if ll else 0) + (1 if prev_sl["price"] < sl3["price"] else 0)
+    else:
+        hh_s = 1 if hh else 0;  hl_s = 1 if hl else 0
+        lh_s = 1 if lh else 0;  ll_s = 1 if ll else 0
+
+    if   hh_s >= 1 and hl_s >= 1:
+        st, st_cn, st_sc, bias = "bullish",     "多头结构 (HH+HL) ↑", +2, "高低点持续抬升，顺势做多，回调低点是买入机会"
+    elif lh_s >= 1 and ll_s >= 1:
+        st, st_cn, st_sc, bias = "bearish",     "空头结构 (LH+LL) ↓", -2, "高低点持续下移，顺势做空，反弹高点是卖出机会"
+    elif hh_s >= 1 and ll_s >= 1:
+        st, st_cn, st_sc, bias = "distribution","派发结构 (HH+LL)",    -1, "区间扩张，高点抬升但低点下移，等待方向突破"
+    elif lh_s >= 1 and hl_s >= 1:
+        st, st_cn, st_sc, bias = "accumulation","吸筹结构 (LH+HL)",    +1, "区间收窄震荡，等待 CHoCH↑ 确认多头方向"
+    else:
+        st, st_cn, st_sc, bias = "transitional","过渡震荡（方向未明）", 0,  "结构混乱，避免重仓，等待清晰高低点序列"
+
+    events = []
+    ksh, ksl = last_sh["price"], last_sl["price"]
+    tail30 = recent.iloc[max(0, n - 31):]
+
+    for j in range(1, len(tail30)):
+        pc = float(tail30["close"].iloc[j - 1])
+        cc = float(tail30["close"].iloc[j])
+        cd = tail30["date"].iloc[j]
+        if pc <= ksh < cc:
+            et = "BOS_UP" if st in ("bullish", "accumulation") else "CHoCH_UP"
+            events.append({"type": et, "price": round(ksh, 2), "date": str(cd)[:16],
+                           "direction": "bullish",
+                           "cn": "结构突破↑（趋势延续）" if et == "BOS_UP" else "性质改变↑（空转多！）"})
+        if pc >= ksl > cc:
+            et = "BOS_DOWN" if st in ("bearish", "distribution") else "CHoCH_DOWN"
+            events.append({"type": et, "price": round(ksl, 2), "date": str(cd)[:16],
+                           "direction": "bearish",
+                           "cn": "结构突破↓（趋势延续）" if et == "BOS_DOWN" else "性质改变↓（多转空！）"})
+
+    rev = events[-3:]
+    if any(e["type"] == "CHoCH_UP"   for e in rev):
+        st_sc = max(st_sc, +2);  bias = "CHoCH↑ 确认：空头结构已被打破，多头接管市场"
+    if any(e["type"] == "CHoCH_DOWN" for e in rev):
+        st_sc = min(st_sc, -2);  bias = "CHoCH↓ 确认：多头结构已被打破，空头接管市场"
+
+    cp = float(recent["close"].iloc[-1])
+    return {
+        "structure":       st,
+        "structure_cn":    st_cn,
+        "structure_score": st_sc,
+        "trading_bias":    bias,
+        "events":          events[-5:],
+        "key_high": {"price": round(last_sh["price"], 2), "date": str(last_sh["date"])[:16],
+                     "dist_pct": round((last_sh["price"] - cp) / cp * 100, 2)},
+        "key_low":  {"price": round(last_sl["price"], 2), "date": str(last_sl["date"])[:16],
+                     "dist_pct": round((cp - last_sl["price"]) / cp * 100, 2)},
+        "swing_highs": [{"price": round(h["price"], 2), "date": str(h["date"])[:16]} for h in highs[-5:]],
+        "swing_lows":  [{"price": round(l["price"], 2), "date": str(l["date"])[:16]} for l in lows[-5:]],
+    }
+
+
+# ─────────────────────────────────────────────
+# C-5. 流动性猎杀区估算（磁吸效应模型）
+# ─────────────────────────────────────────────
+
+def estimate_stop_hunt_zones(supports, resistances, current_price: float,
+                              atr_val: float, oi_usdt: float = None) -> list:
+    """
+    机构视角：支撑/阻力位是止损单聚集地（流动性池）。
+    价格受「磁吸效应」吸引至此，清扫止损后反转。
+
+    核心结论：
+      ① 不要在支撑位买入——要在支撑下方止损潮结束后买入
+      ② 不要在阻力位卖出——要在阻力上方轧空结束后卖出
+      ③ 磁力强度 = S/R权重 × 距离衰减(指数) × OI规模因子
+
+    返回按磁力强度降序排列的猎杀区列表，每项包含：
+      type, direction_label, sr_level, hunt_zone_low/high, hunt_target,
+      magnetic_strength, hunt_probability, recommended_entry, stop_loss,
+      expected_gain_pct, near_hunt, distance_pct, warning, action
+    """
+    import math
+    zones = []
+
+    if not atr_val or atr_val <= 0 or not current_price:
+        return []
+
+    # ATR 百分比（无量纲，用于归一化距离衰减的比较基准）
+    atr_pct = atr_val / current_price
+
+    # OI 规模因子：全市场杠杆仓位越多，止损单密度越高，磁吸越强
+    # BTC 典型 OI：100亿~500亿 USDT → 归一化到 [0.6, 1.8]
+    oi_factor = 1.0
+    if oi_usdt and oi_usdt > 0:
+        oi_factor = min(1.8, max(0.6, oi_usdt / 25_000_000_000))
+
+    def _build_zone(sr_price, sr_weight, is_long_hunt):
+        """构造单个猎杀区对象"""
+        if is_long_hunt:
+            distance_pct   = (current_price - sr_price) / current_price
+            # 猎杀区：支撑下方 0.3~1.5×ATR（止损单密集带）
+            hunt_target       = round(sr_price - 0.8  * atr_val, 2)
+            hunt_zone_high    = round(sr_price - 0.3  * atr_val, 2)
+            hunt_zone_low     = round(sr_price - 1.5  * atr_val, 2)
+            # 推荐入场：止损潮尾部（猎杀区低端略上方）反转概率最高
+            recommended_entry = round(hunt_zone_low   + 0.25 * atr_val, 2)
+            stop_loss         = round(hunt_zone_low   - 0.5  * atr_val, 2)
+            expected_gain_pct = round(
+                (sr_price - recommended_entry) / recommended_entry * 100 + 2.0, 1)
+            hunt_type         = "long_stop_hunt"
+            direction_label   = "多头止损猎杀 ↓"
+        else:
+            distance_pct   = (sr_price - current_price) / current_price
+            # 猎杀区：阻力上方 0.3~1.5×ATR（空头止损密集带）
+            hunt_target       = round(sr_price + 0.8  * atr_val, 2)
+            hunt_zone_low     = round(sr_price + 0.3  * atr_val, 2)
+            hunt_zone_high    = round(sr_price + 1.5  * atr_val, 2)
+            recommended_entry = round(hunt_zone_high  - 0.25 * atr_val, 2)
+            stop_loss         = round(hunt_zone_high  + 0.5  * atr_val, 2)
+            expected_gain_pct = round(
+                (recommended_entry - sr_price) / sr_price * 100 + 2.0, 1)
+            hunt_type         = "short_stop_hunt"
+            direction_label   = "空头轧仓猎杀 ↑"
+
+        # 距离衰减：指数函数，ATR 的 2 倍距离时衰减到 1/e ≈ 0.37
+        distance_decay    = math.exp(-distance_pct / max(atr_pct * 2, 0.001))
+        magnetic_strength = round(min(10.0, sr_weight * distance_decay * oi_factor), 2)
+
+        if   magnetic_strength >= 6.0: prob = "高"
+        elif magnetic_strength >= 3.5: prob = "中"
+        else:                          prob = "低"
+
+        # 近距离猎杀警报：价格已在 S/R 的 1×ATR 以内（即将触发）
+        near_hunt = distance_pct < atr_pct
+
+        if is_long_hunt:
+            if near_hunt:
+                warning = (f"⚠️ 价格距支撑 ${sr_price:,.0f} 仅 {distance_pct*100:.1f}%，"
+                           f"止损猎杀即将触发！勿在支撑位接多")
+                action  = (f"等待价格插穿 ${sr_price:,.0f} 止损潮结束后，"
+                           f"在 ${recommended_entry:,.0f} 附近挂限价买单（止损 ${stop_loss:,.0f}）")
+            else:
+                warning = (f"${sr_price:,.0f} 支撑下方聚集多头止损单，"
+                           f"跌破后将加速至 ${hunt_target:,.0f} 附近完成止损猎杀后反转")
+                action  = (f"勿在 ${sr_price:,.0f} 追多；"
+                           f"在 ${recommended_entry:,.0f} 预设限价买单，止损 ${stop_loss:,.0f}，"
+                           f"预期反弹 +{expected_gain_pct:.1f}%")
+        else:
+            if near_hunt:
+                warning = (f"⚠️ 价格距阻力 ${sr_price:,.0f} 仅 {distance_pct*100:.1f}%，"
+                           f"空头轧仓即将触发！勿在阻力位追空")
+                action  = (f"等待价格刺穿 ${sr_price:,.0f} 轧仓完成后，"
+                           f"在 ${recommended_entry:,.0f} 附近挂限价卖单（止损 ${stop_loss:,.0f}）")
+            else:
+                warning = (f"${sr_price:,.0f} 阻力上方聚集空头止损单，"
+                           f"突破后将加速至 ${hunt_target:,.0f} 附近完成轧空后反转")
+                action  = (f"勿在 ${sr_price:,.0f} 追空；"
+                           f"在 ${recommended_entry:,.0f} 预设限价卖单，止损 ${stop_loss:,.0f}，"
+                           f"预期下跌 -{expected_gain_pct:.1f}%")
+
+        return {
+            "type":               hunt_type,
+            "direction_label":    direction_label,
+            "sr_level":           round(sr_price,         2),
+            "sr_weight":          round(sr_weight,         2),
+            "hunt_zone_low":      hunt_zone_low,
+            "hunt_zone_high":     hunt_zone_high,
+            "hunt_target":        hunt_target,
+            "magnetic_strength":  magnetic_strength,
+            "hunt_probability":   prob,
+            "recommended_entry":  recommended_entry,
+            "stop_loss":          stop_loss,
+            "expected_gain_pct":  expected_gain_pct,
+            "near_hunt":          near_hunt,
+            "distance_pct":       round(distance_pct * 100, 2),
+            "warning":            warning,
+            "action":             action,
+        }
+
+    # 支撑位 → 多头止损猎杀区
+    for sup in supports[:5]:
+        sup_price  = sup[0] if isinstance(sup, (list, tuple)) else sup.get("price", 0)
+        sup_weight = sup[1] if isinstance(sup, (list, tuple)) else sup.get("score", 1.0)
+        if not sup_price or sup_price >= current_price:
+            continue
+        zones.append(_build_zone(sup_price, sup_weight, is_long_hunt=True))
+
+    # 阻力位 → 空头轧仓猎杀区
+    for res in resistances[:5]:
+        res_price  = res[0] if isinstance(res, (list, tuple)) else res.get("price", 0)
+        res_weight = res[1] if isinstance(res, (list, tuple)) else res.get("score", 1.0)
+        if not res_price or res_price <= current_price:
+            continue
+        zones.append(_build_zone(res_price, res_weight, is_long_hunt=False))
+
+    # 按磁力强度降序
+    zones.sort(key=lambda x: x["magnetic_strength"], reverse=True)
+    return zones
+
+
+# ─────────────────────────────────────────────
 # D. Fibonacci 展开
 # ─────────────────────────────────────────────
 
@@ -419,8 +885,14 @@ def calculate_fibonacci(df: pd.DataFrame, lookback: int = 90):
     high   = recent["high"].max()
     low    = recent["low"].min()
     diff   = high - low
+    # 回调位（0% = 摆动高点, 100% = 摆动低点）
     levels = {f"Fib {r:.1%}": high - diff * r
               for r in [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]}
+    # 延伸位（向上超越高点 = 获利目标；向下超越低点 = 做空目标）
+    # 上方延伸：low + diff * r  （专业交易者常用获利位）
+    for r in [1.272, 1.414, 1.618, 2.0, 2.618]:
+        pct = r * 100
+        levels[f"Ext {pct:.1f}%"] = low + diff * r
     return levels, high, low
 
 
@@ -475,13 +947,15 @@ def create_chart(df: pd.DataFrame, supports, resistances,
     ), row=1, col=1)
 
     x0, x1 = plot_df["date"].iloc[0], plot_df["date"].iloc[-1]
-    for price, _ in supports:
+    for level in supports:
+        price = level[0]
         fig.add_shape(type="line", x0=x0, x1=x1, y0=price, y1=price,
                       line=dict(color="rgba(38,166,154,0.7)", width=1.5, dash="dot"), row=1, col=1)
         fig.add_annotation(x=x1, y=price, text=f"  支撑 ${price:,.0f}",
                            showarrow=False, font=dict(color="#26a69a", size=10),
                            xanchor="left", row=1, col=1)
-    for price, _ in resistances:
+    for level in resistances:
+        price = level[0]
         fig.add_shape(type="line", x0=x0, x1=x1, y0=price, y1=price,
                       line=dict(color="rgba(239,83,80,0.7)", width=1.5, dash="dot"), row=1, col=1)
         fig.add_annotation(x=x1, y=price, text=f"  阻力 ${price:,.0f}",
@@ -563,7 +1037,9 @@ def create_chart(df: pd.DataFrame, supports, resistances,
 
 def generate_report(df: pd.DataFrame, supports, resistances,
                     fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True,
-                    liq_clusters: list = None, df_backtest: pd.DataFrame = None):
+                    liq_clusters: list = None, df_backtest: pd.DataFrame = None,
+                    market_structure: dict = None, fvg_zones: list = None,
+                    volume_profile: dict = None):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -613,6 +1089,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         ("EMA50", latest["ema50"], "中期动态"),
     ]
     rd["ma"] = []
+    ma_group_raw = 0  # P0-C: 趋势组原始分，后续统一限幅 ±2
     for name, val, desc in ma_items:
         if pd.isna(val):
             continue
@@ -621,12 +1098,22 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         # 震荡市禁用 MA 突破评分（防假突破）
         ma_active = (regime != "ranging")
         if ma_active:
-            score += 1 if is_above else -1
+            ma_group_raw += 1 if is_above else -1   # 累积而非直接加总分
         regime_note = "" if ma_active else " [震荡市-暂停]"
         emit(f"  {name:<6}({desc}): ${val:>10,.2f}  {'上方 ↑' if is_above else '下方 ↓'} {diff_pct:+.2f}%  [{'+'if is_above else'-'}]{regime_note}")
         rd["ma"].append({"name": name, "desc": desc, "val": val,
                          "diff_pct": diff_pct, "above": is_above, "signal": "+" if is_above else "-",
                          "active": ma_active})
+    # 动态权重：趋势市MA更可靠，震荡市MA信号噪音大
+    # trending: MA上限±3（强趋势信号更有意义）；ranging: 限压±1（防假突破）
+    _ma_cap = 3 if regime == "trending" else (1 if regime == "ranging" else 2)
+    ma_group_score = max(-_ma_cap, min(_ma_cap, ma_group_raw))
+    score += ma_group_score
+    emit(f"  [趋势组 {regime}] 原始分 {ma_group_raw:+d} → 限幅后 {ma_group_score:+d}/±{_ma_cap}")
+    rd["ma_group_score"] = ma_group_score
+
+    # ── 动量组（RSI + MACD + KDJ）——限幅 ±3 ──────────────────
+    momentum_group_raw = 0   # P0-C: 动量组原始分
 
     # ── RSI ──
     rsi_val = latest["rsi"]
@@ -646,7 +1133,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         elif rsi_val >= 55: rsi_signal = "偏强区域 (55-70)";          rsi_score = +1
         elif rsi_val <= 45: rsi_signal = "偏弱区域 (30-45)";          rsi_score = -1
         else:               rsi_signal = "中性区域 (45-55)";           rsi_score = 0
-    score += rsi_score
+    momentum_group_raw += rsi_score   # 累积到动量组
     emit(f"  RSI = {rsi_val:.2f}  ->  {rsi_signal}")
     rd["rsi"] = {"val": rsi_val, "signal": rsi_signal, "score": rsi_score}
 
@@ -659,6 +1146,11 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     elif price <= bb_lower: bb_signal = "触及/跌破下轨 -> 弱势但注意反弹"; bb_score = +1
     elif price > bb_mid:    bb_signal = "中轨上方 -> 偏多";                 bb_score = +1
     else:                   bb_signal = "中轨下方 -> 偏空";                 bb_score = -1
+    # 震荡市BB均值回归信号更可靠，权重×1.5；趋势市BB只提供方向辅助，权重×0.5
+    if regime == "trending":
+        bb_score = round(bb_score * 0.5)   # 趋势市半权：±0或±1→0（边界信号仍保留）
+    elif regime == "ranging":
+        bb_score = round(bb_score * 1.5)   # 震荡市加权：±1→±1(ceil), ±2不会出现
     score += bb_score
     emit(f"  上轨: ${bb_upper:,.2f}  中轨: ${bb_mid:,.2f}  下轨: ${bb_lower:,.2f}")
     emit(f"  带宽: {bb_width_pct:.2f}%  |  当前位置: {bb_signal}")
@@ -677,7 +1169,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         macd_signal = "MACD 在信号线上方 -> 多头"; macd_score = +1
     else:
         macd_signal = "MACD 在信号线下方 -> 空头"; macd_score = -1
-    score += macd_score
+    momentum_group_raw += macd_score   # 累积到动量组
     hist_trend = "柱状图扩大 (动能增强)" if abs(macd_hist) > abs(prev["macd_hist"]) else "柱状图收缩 (动能减弱)"
     emit(f"  MACD: {macd_val:.2f}  信号线: {macd_sig:.2f}  柱: {macd_hist:.2f}")
     emit(f"  信号: {macd_signal}  |  {hist_trend}")
@@ -716,10 +1208,20 @@ def generate_report(df: pd.DataFrame, supports, resistances,
             kdj_signal = "K > D 偏多"; kdj_score = +1
         else:
             kdj_signal = "K < D 偏空"; kdj_score = -1
-    score += kdj_score
+    momentum_group_raw += kdj_score   # 累积到动量组
     emit(f"  K: {k_val:.2f}  D: {d_val:.2f}  J: {j_val:.2f}")
     emit(f"  信号: {kdj_signal}")
     rd["kdj"] = {"k": k_val, "d": d_val, "j": j_val, "signal": kdj_signal, "score": kdj_score}
+
+    # 震荡市动量指标更准（RSI/KDJ均值回归），上限±4；趋势市限±2（防逆势）
+    _mom_cap = 2 if regime == "trending" else (4 if regime == "ranging" else 3)
+    momentum_group_score = max(-_mom_cap, min(_mom_cap, momentum_group_raw))
+    score += momentum_group_score
+    emit(f"\n  [动量组 RSI+MACD+KDJ {regime}] 原始分 {momentum_group_raw:+d} → 限幅后 {momentum_group_score:+d}/±{_mom_cap}")
+    rd["momentum_group_score"] = momentum_group_score
+
+    # ── 成交量组（OBV + CVD）——限幅 ±2 ──────────────────────
+    volume_group_raw = 0   # P0-C: 成交量组原始分
 
     # ── OBV ──
     obv_now, obv_prev = latest["obv"], df["obv"].iloc[-20]
@@ -727,11 +1229,91 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     obv_up    = obv_now > obv_prev
     obv_trend = "上升 -> 资金流入，价格上涨得到支撑" if obv_up else "下降 -> 资金流出，价格下跌压力"
     obv_score = 1 if obv_up else -1
-    score    += obv_score
+    volume_group_raw += obv_score   # 累积到成交量组
     emit(f"  当前OBV: {obv_now:,.0f}  20根前: {obv_prev:,.0f}")
     emit(f"  趋势: {obv_trend}")
     rd["obv"] = {"now": obv_now, "prev": obv_prev, "trend": obv_trend,
                  "up": obv_up, "score": obv_score}
+
+    # ── RSI 背离 + OBV 背离检测 ─────────────────────────────────
+    emit(f"\n【背离检测 RSI & OBV Divergence】{sep}")
+    div_score  = 0
+    div_signals = []
+    _DIV_WINDOW = 40   # 回溯窗口根数
+    if len(df) >= _DIV_WINDOW + 5 and "rsi" in df.columns:
+        _seg   = df.tail(_DIV_WINDOW).reset_index(drop=True)
+        _close = _seg["close"].values
+        _rsi   = _seg["rsi"].values
+        _obv   = _seg["obv"].values
+        _n     = len(_seg)
+
+        def _find_pivot_highs(arr, radius=4):
+            idx = []
+            for i in range(radius, _n - radius):
+                if arr[i] == max(arr[i-radius:i+radius+1]):
+                    idx.append(i)
+            return idx
+
+        def _find_pivot_lows(arr, radius=4):
+            idx = []
+            for i in range(radius, _n - radius):
+                if arr[i] == min(arr[i-radius:i+radius+1]):
+                    idx.append(i)
+            return idx
+
+        ph_price = _find_pivot_highs(_close)
+        pl_price = _find_pivot_lows(_close)
+        ph_rsi   = _find_pivot_highs(_rsi)
+        pl_rsi   = _find_pivot_lows(_rsi)
+        ph_obv   = _find_pivot_highs(_obv)
+        pl_obv   = _find_pivot_lows(_obv)
+
+        # RSI 顶背离：价格新高但 RSI 低高
+        if len(ph_price) >= 2 and len(ph_rsi) >= 2:
+            pp1, pp2 = ph_price[-2], ph_price[-1]  # 先高、后高
+            rp1 = min(ph_rsi, key=lambda x: abs(x - pp1))
+            rp2 = min(ph_rsi, key=lambda x: abs(x - pp2))
+            if (_close[pp2] > _close[pp1] * 1.002 and
+                    _rsi[rp2] < _rsi[rp1] - 2 and pp2 > pp1):
+                div_score -= 2
+                div_signals.append("RSI顶背离 ⚠️ 价格↑新高 但RSI↓低高 → 上涨动能衰竭，警惕反转")
+        # RSI 底背离：价格新低但 RSI 高低
+        if len(pl_price) >= 2 and len(pl_rsi) >= 2:
+            pp1, pp2 = pl_price[-2], pl_price[-1]
+            rp1 = min(pl_rsi, key=lambda x: abs(x - pp1))
+            rp2 = min(pl_rsi, key=lambda x: abs(x - pp2))
+            if (_close[pp2] < _close[pp1] * 0.998 and
+                    _rsi[rp2] > _rsi[rp1] + 2 and pp2 > pp1):
+                div_score += 2
+                div_signals.append("RSI底背离 ✅ 价格↓新低 但RSI↑高低 → 下跌动能衰竭，关注见底")
+        # OBV 顶背离：价格新高但 OBV 低高
+        if len(ph_price) >= 2 and len(ph_obv) >= 2:
+            pp1, pp2 = ph_price[-2], ph_price[-1]
+            op1 = min(ph_obv, key=lambda x: abs(x - pp1))
+            op2 = min(ph_obv, key=lambda x: abs(x - pp2))
+            if (_close[pp2] > _close[pp1] * 1.002 and
+                    _obv[op2] < _obv[op1] * 0.998 and pp2 > pp1):
+                div_score -= 1
+                div_signals.append("OBV顶背离 ⚠️ 价格↑新高 但OBV↓ → 量价背离，资金未跟进")
+        # OBV 底背离：价格新低但 OBV 高低
+        if len(pl_price) >= 2 and len(pl_obv) >= 2:
+            pp1, pp2 = pl_price[-2], pl_price[-1]
+            op1 = min(pl_obv, key=lambda x: abs(x - pp1))
+            op2 = min(pl_obv, key=lambda x: abs(x - pp2))
+            if (_close[pp2] < _close[pp1] * 0.998 and
+                    _obv[op2] > _obv[op1] * 1.002 and pp2 > pp1):
+                div_score += 1
+                div_signals.append("OBV底背离 ✅ 价格↓新低 但OBV↑ → 量价背离，资金暗中吸筹")
+
+    div_score = max(-3, min(3, div_score))   # 限幅 ±3
+    volume_group_raw += div_score            # 并入成交量组
+    if div_signals:
+        for s in div_signals:
+            emit(f"  {s}")
+    else:
+        emit("  未检测到明显背离")
+    emit(f"  背离得分: {div_score:+d}")
+    rd["divergence"] = {"score": div_score, "signals": div_signals}
 
     # ── CVD（主动成交量差值背离）────────────────────────────────────
     cvd_score  = 0
@@ -772,7 +1354,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         else:
             cvd_signal = f"主动买卖均衡 OFI {last_ofi:+.2f}"
 
-        score += cvd_score
+        volume_group_raw += cvd_score   # 累积到成交量组
         emit(f"  OFI(最后K): {last_ofi:+.3f}  Delta: {last_delta:+,.0f}")
         emit(f"  近20K CVD变化率: {norm_cvd:+.3f}  价格变化率: {norm_price:+.3f}")
     else:
@@ -785,6 +1367,12 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         "last_delta": round(last_delta, 2),
         "last_cvd":   round(last_cvd,   2),
     }
+
+    # 成交量组限幅 ±2：OBV+CVD 最多贡献 ±2
+    volume_group_score = max(-2, min(2, volume_group_raw))
+    score += volume_group_score
+    emit(f"\n  [成交量组 OBV+CVD] 原始分 {volume_group_raw:+d} → 限幅后 {volume_group_score:+d}/±2")
+    rd["volume_group_score"] = volume_group_score
 
     # ── 支撑/阻力 ──
     emit(f"\n【支撑 / 阻力位】{sep}")
@@ -819,14 +1407,184 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     rd["resistances"] = res_list
     rd["supports"]    = sup_list
 
+    # ── K线形态识别 ─────────────────────────────────────────────────────────────
+    emit(f"\n【K线形态识别 · Candlestick Patterns】{sep}")
+    candle_patterns = []
+    candle_score    = 0
+
+    if len(df) >= 4:
+        c0 = df.iloc[-1]   # 当前K线
+        c1 = df.iloc[-2]   # 前1根
+        c2 = df.iloc[-3]   # 前2根
+
+        def _body(c):       return abs(float(c["close"]) - float(c["open"]))
+        def _rng(c):        return max(1e-9, float(c["high"]) - float(c["low"]))
+        def _upper_wick(c): return float(c["high"]) - max(float(c["open"]), float(c["close"]))
+        def _lower_wick(c): return min(float(c["open"]), float(c["close"])) - float(c["low"])
+        def _is_bull(c):    return float(c["close"]) >= float(c["open"])
+
+        b0, r0 = _body(c0), _rng(c0)
+        uw0, lw0 = _upper_wick(c0), _lower_wick(c0)
+        b1, r1 = _body(c1), _rng(c1)
+
+        # 是否处于 S/R 关键位附近（1.5%范围内）
+        _sup_prices = [s[0] for s in (supports or []) if s[0] < price]
+        _res_prices = [r[0] for r in (resistances or []) if r[0] > price]
+        _at_sup = any(abs(price - sp) / price < 0.015 for sp in _sup_prices)
+        _at_res = any(abs(price - rp) / price < 0.015 for rp in _res_prices)
+
+        # ── 1. Pin Bar ──────────────────────────────────────────────────────────
+        if r0 > price * 0.001 and b0 > 0:
+            if lw0 >= 2.5 * b0 and lw0 >= 0.60 * r0:
+                # 看涨Pin Bar：长下影线拒绝低价（锤子线）
+                adj = +3 if _at_sup else +2
+                candle_score += adj
+                candle_patterns.append({
+                    "name": "看涨Pin Bar",
+                    "icon": "🔨",
+                    "type": "bullish",
+                    "score": adj,
+                    "desc": f"长下影线拒绝低价 (下影{lw0/r0*100:.0f}% 实体{b0/r0*100:.0f}%)" +
+                            (" + 支撑位共振" if _at_sup else ""),
+                })
+            elif uw0 >= 2.5 * b0 and uw0 >= 0.60 * r0:
+                # 看跌Pin Bar：长上影线拒绝高价（射击之星）
+                adj = -3 if _at_res else -2
+                candle_score += adj
+                candle_patterns.append({
+                    "name": "看跌Pin Bar",
+                    "icon": "⭐",
+                    "type": "bearish",
+                    "score": adj,
+                    "desc": f"长上影线拒绝高价 (上影{uw0/r0*100:.0f}% 实体{b0/r0*100:.0f}%)" +
+                            (" + 阻力位共振" if _at_res else ""),
+                })
+
+        # ── 2. 吞噬形态（Engulfing）────────────────────────────────────────────
+        if (not _is_bull(c1) and _is_bull(c0) and
+                float(c0["open"]) <= float(c1["close"]) and
+                float(c0["close"]) >= float(c1["open"]) and
+                b0 >= b1 * 0.9):
+            # 看涨吞噬：前阴后阳，阳线完全包裹阴线实体
+            adj = +3 if _at_sup else +2
+            candle_score += adj
+            candle_patterns.append({
+                "name": "看涨吞噬",
+                "icon": "🟢",
+                "type": "bullish",
+                "score": adj,
+                "desc": f"阳线吞噬前阴线 (实体比 {b0/max(b1, 1e-9):.1f}×)" +
+                        (" + 支撑位共振" if _at_sup else ""),
+            })
+        elif (_is_bull(c1) and not _is_bull(c0) and
+                float(c0["open"]) >= float(c1["close"]) and
+                float(c0["close"]) <= float(c1["open"]) and
+                b0 >= b1 * 0.9):
+            # 看跌吞噬：前阳后阴，阴线完全包裹阳线实体
+            adj = -3 if _at_res else -2
+            candle_score += adj
+            candle_patterns.append({
+                "name": "看跌吞噬",
+                "icon": "🔴",
+                "type": "bearish",
+                "score": adj,
+                "desc": f"阴线吞噬前阳线 (实体比 {b0/max(b1, 1e-9):.1f}×)" +
+                        (" + 阻力位共振" if _at_res else ""),
+            })
+
+        # ── 3. Inside Bar（孕线/内包线）或 Doji（十字星）──────────────────────
+        elif (float(c0["high"]) < float(c1["high"]) and
+                float(c0["low"]) > float(c1["low"]) and
+                r1 > 0 and r0 / r1 < 0.75):
+            dir_hint = "多头" if score > 0 else ("空头" if score < 0 else "中性")
+            candle_patterns.append({
+                "name": "Inside Bar",
+                "icon": "📦",
+                "type": "neutral",
+                "score": 0,
+                "desc": f"价格压缩蓄力 (内包比{r0/r1*100:.0f}%)，当前倾向{dir_hint}突破，跟随突破方向入场",
+            })
+        elif r0 > price * 0.002 and b0 / r0 < 0.10:
+            if   lw0 > uw0 * 3: doji_type = "蜻蜓十字"
+            elif uw0 > lw0 * 3: doji_type = "墓碑十字"
+            else:               doji_type = "标准十字"
+            at_any = _at_sup or _at_res
+            candle_patterns.append({
+                "name": "十字星",
+                "icon": "✚",
+                "type": "neutral",
+                "score": 0,
+                "desc": f"{doji_type}，多空均衡等待方向选择" +
+                        (" ⚠️ 关键位置出现，警惕反转" if at_any else ""),
+            })
+
+        # ── 4. 大实体 Marubozu（光头光脚）──────────────────────────────────────
+        if r0 > price * 0.003 and b0 / r0 >= 0.80:
+            if _is_bull(c0):
+                candle_score += 1
+                candle_patterns.append({
+                    "name": "大阳实体",
+                    "icon": "⬆️",
+                    "type": "bullish",
+                    "score": +1,
+                    "desc": f"强势买盘主导 (实体{b0/r0*100:.0f}%)，多头强势",
+                })
+            else:
+                candle_score -= 1
+                candle_patterns.append({
+                    "name": "大阴实体",
+                    "icon": "⬇️",
+                    "type": "bearish",
+                    "score": -1,
+                    "desc": f"强势卖盘主导 (实体{b0/r0*100:.0f}%)，空头强势",
+                })
+
+        # ── 5. 三白兵 / 三黑鸦 ─────────────────────────────────────────────────
+        b2, r2 = _body(c2), _rng(c2)
+        if (all(_is_bull(c) for c in [c0, c1, c2]) and
+                float(c0["close"]) > float(c1["close"]) > float(c2["close"]) and
+                b0 > r0 * 0.40 and b1 > r1 * 0.40 and b2 > r2 * 0.40):
+            candle_score += 1
+            candle_patterns.append({
+                "name": "三白兵",
+                "icon": "☀️",
+                "type": "bullish",
+                "score": +1,
+                "desc": "连续三根实体阳线且高点递升，多头趋势强劲",
+            })
+        elif (all(not _is_bull(c) for c in [c0, c1, c2]) and
+                float(c0["close"]) < float(c1["close"]) < float(c2["close"]) and
+                b0 > r0 * 0.40 and b1 > r1 * 0.40 and b2 > r2 * 0.40):
+            candle_score -= 1
+            candle_patterns.append({
+                "name": "三黑鸦",
+                "icon": "🌑",
+                "type": "bearish",
+                "score": -1,
+                "desc": "连续三根实体阴线且低点递降，空头趋势强劲",
+            })
+
+    candle_score = max(-4, min(4, candle_score))
+    score += candle_score
+    if candle_patterns:
+        for p in candle_patterns:
+            score_tag = f"[{p['score']:+d}]" if p["score"] != 0 else "[中性]"
+            emit(f"  {p['icon']} {p['name']} {score_tag}: {p['desc']}")
+    else:
+        emit("  无明显K线形态信号")
+    emit(f"  形态综合得分: {candle_score:+d}")
+    rd["candle_patterns"] = {"score": candle_score, "patterns": candle_patterns}
+
     # ── Fibonacci ──
-    emit(f"\n【Fibonacci 回调位】{sep}")
+    emit(f"\n【Fibonacci 回调位 & 延伸位】{sep}")
     fib_out = []
     for label, fp in sorted(fib_levels.items(), key=lambda x: x[1], reverse=True):
-        dist = (fp - price) / price * 100
+        dist   = (fp - price) / price * 100
+        is_ext = label.startswith("Ext")
         marker = " <- 当前价附近" if abs(dist) < 2 else ""
-        emit(f"  {label:<12}: ${fp:>10,.2f}  ({dist:+.2f}% {'↑' if fp>price else '↓'}){marker}")
-        fib_out.append({"label": label, "price": fp, "dist_pct": dist, "near": abs(dist) < 2})
+        type_tag = "[延伸]" if is_ext else "[回调]"
+        emit(f"  {type_tag} {label:<12}: ${fp:>10,.2f}  ({dist:+.2f}% {'↑' if fp>price else '↓'}){marker}")
+        fib_out.append({"label": label, "price": fp, "dist_pct": dist, "near": abs(dist) < 2, "ext": is_ext})
     rd["fib"] = fib_out
 
     # ── 市场机制写入 rd ──────────────────────────────────
@@ -948,6 +1706,17 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         liq_score = max(-2, min(2, liq_score))
         score += liq_score
 
+        # ── 止损猎杀区：修正 liq 止损建议（使用更精确的猎杀区止损价）──
+        # 覆盖前面基于 0.3×ATR 的粗略止损，用猎杀区低端更精确地定位
+        if best_long_sl is not None:
+            for lc in long_liq:
+                lc_price = lc["price"]
+                if lc_price < price:
+                    hunt_low = lc_price - 1.5 * atr_val
+                    if hunt_low < best_long_sl:
+                        best_long_sl = round(hunt_low, 2)
+                    break
+
         liq_out = [{
             "price":    lc["price"],
             "qty":      lc.get("qty", 0),
@@ -968,9 +1737,161 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         }
         emit(f"  清算区综合评分: {liq_score:+d}")
 
+    # ── 市场结构分析（Market Structure · BOS / CHoCH）────────────────────
+    ms_score = 0
+    emit(f"\n【市场结构分析 · BOS / CHoCH】{sep}")
+    if market_structure and market_structure.get("structure") not in ("unknown", None):
+        ms = market_structure
+        st_sc  = ms.get("structure_score", 0)
+        st_cn  = ms.get("structure_cn",    "未知")
+        bias   = ms.get("trading_bias",    "")
+        events = ms.get("events",          [])
+        kh     = ms.get("key_high",        {})
+        kl     = ms.get("key_low",         {})
+        ms_score = st_sc
+        score   += ms_score
+
+        emit(f"  结构: {st_cn}  (得分 {st_sc:+d})")
+        emit(f"  操作偏向: {bias}")
+        if kh:
+            emit(f"  关键摆动高点: ${kh.get('price',0):,.2f}  ({kh.get('dist_pct',0):+.2f}%)")
+        if kl:
+            emit(f"  关键摆动低点: ${kl.get('price',0):,.2f}  (-{abs(kl.get('dist_pct',0)):.2f}%)")
+        if events:
+            emit(f"  近期结构事件（最近3个）:")
+            for ev in events[-3:]:
+                icon = "✅" if ev.get("direction") == "bullish" else "🔴"
+                emit(f"    {icon} {ev.get('cn','')}  @${ev.get('price',0):,.2f}  {ev.get('date','')[:13]}")
+    else:
+        emit("  市场结构数据不足或未提供")
+
+    rd["market_structure"] = market_structure or {}
+
+    # ── Volume Profile 快照 ────────────────────────────────────────────
+    emit(f"\n【Volume Profile · POC / VAH / VAL】{sep}")
+    if volume_profile and volume_profile.get("poc"):
+        vp = volume_profile
+        poc = vp.get("poc", 0);  vah = vp.get("vah", 0);  val = vp.get("val", 0)
+        emit(f"  POC (成交量最大价位): ${poc:,.2f}  {'↑ 价格上方' if vp.get('poc_above') else '↓ 价格下方'}")
+        emit(f"  VAH (价值区间上沿):   ${vah:,.2f}")
+        emit(f"  VAL (价值区间下沿):   ${val:,.2f}")
+        emit(f"  价值区间宽度: {vp.get('va_width_pct',0):.1f}%  类型: {vp.get('dist_type','')}")
+        if vp.get("hvn"):
+            hvn_str = "  |  ".join(f"${h['price']:,.0f}({h['vol_pct']:.1f}%)" for h in vp["hvn"][:3])
+            emit(f"  HVN 高成交量节点: {hvn_str}")
+    else:
+        emit("  Volume Profile 数据不足")
+
+    rd["volume_profile"] = volume_profile or {}
+
+    # ── Fair Value Gap 分析（FVG · 价格失衡区）────────────────────────
+    fvg_score = 0
+    emit(f"\n【Fair Value Gap · 价格失衡区】{sep}")
+    _atr_for_fvg = float(df["atr"].iloc[-1]) \
+        if "atr" in df.columns and not pd.isna(df["atr"].iloc[-1]) else 0.0
+    if fvg_zones:
+        emit(f"  发现 {len(fvg_zones)} 个未填充/部分填充 FVG（按距当前价排序）:")
+        for fg in fvg_zones[:5]:
+            icon = "🟢" if fg["type"] == "bullish_fvg" else "🔴"
+            dist_pct = (fg["mid"] - price) / price * 100
+            emit(f"  {icon} {fg['desc']}")
+            emit(f"     中点 ${fg['mid']:,.2f}  距当前 {dist_pct:+.2f}%  已填充 {fg['filled_pct']:.0f}%")
+        # FVG 评分：最近的 FVG 中点 < 1.5×ATR → 对方向评分 +/-1
+        nearest = fvg_zones[0]
+        near_dist = abs(nearest["mid"] - price)
+        fvg_threshold = _atr_for_fvg * 1.5 if _atr_for_fvg else price * 0.015
+        if near_dist < fvg_threshold:
+            if nearest["type"] == "bullish_fvg" and nearest["mid"] < price:
+                fvg_score = +1
+                emit(f"  ✅ 近距看涨FVG支撑 (${nearest['mid']:,.2f})，回调后磁吸反弹概率高 → +1")
+            elif nearest["type"] == "bearish_fvg" and nearest["mid"] > price:
+                fvg_score = -1
+                emit(f"  ⚠️ 近距看跌FVG压制 (${nearest['mid']:,.2f})，反弹至此遭阻力概率高 → -1")
+        score += fvg_score
+    else:
+        emit("  当前价格范围内未发现显著 FVG")
+
+    rd["fvg_zones"]  = fvg_zones or []
+    rd["fvg_score"]  = fvg_score
+    rd["ms_score"]   = ms_score
+
+    # ── 止损猎杀区分析（磁吸效应模型，不单独计分，但输出操作建议）──────────
+    emit(f"\n【流动性猎杀地图 · 磁吸效应】{sep}")
+    _atr_for_hunt = float(df["atr"].iloc[-1]) \
+        if "atr" in df.columns and not pd.isna(df["atr"].iloc[-1]) else 0.0
+    stop_hunt_zones = estimate_stop_hunt_zones(
+        supports, resistances, current_price=price, atr_val=_atr_for_hunt
+    )
+
+    hunt_score_adj = 0   # 当价格临近高磁力区时，对原有评分做小幅修正
+    near_high_zones = [z for z in stop_hunt_zones
+                       if z["near_hunt"] and z["hunt_probability"] == "高"]
+
+    if stop_hunt_zones:
+        emit(f"  机构视角：以下价位是止损单聚集地，价格受磁吸效应会优先吸收这些流动性再反转")
+        for z in stop_hunt_zones[:4]:
+            prob_icon = "🔴" if z["hunt_probability"] == "高" else ("🟡" if z["hunt_probability"] == "中" else "⚪")
+            emit(f"  {prob_icon} [{z['direction_label']}] 关键位 ${z['sr_level']:,.0f} "
+                 f"→ 猎杀目标 ${z['hunt_target']:,.0f}  磁力 {z['magnetic_strength']:.1f}/10  概率{z['hunt_probability']}")
+            emit(f"     └─ {z['action']}")
+        if near_high_zones:
+            emit(f"\n  ⚠️⚠️  高磁力猎杀警报（{len(near_high_zones)} 个高概率区临近价格）")
+            for z in near_high_zones:
+                emit(f"     → {z['warning']}")
+            # 临近高磁力猎杀区：当前"支撑/阻力"信号置信度打折（-1 修正）
+            hunt_score_adj = -1 if any(z["type"] == "long_stop_hunt" for z in near_high_zones) \
+                             else  1 if any(z["type"] == "short_stop_hunt" for z in near_high_zones) \
+                             else 0
+            score += hunt_score_adj
+            emit(f"     评分修正: {hunt_score_adj:+d}（猎杀风险已纳入综合评分）")
+    else:
+        emit("  无有效 S/R 数据，跳过猎杀区估算")
+        near_high_zones = []
+
+    rd["stop_hunt_zones"] = stop_hunt_zones
+    rd["hunt_score_adj"]  = hunt_score_adj
+    emit(f"  共 {len(stop_hunt_zones)} 个猎杀区，高磁力 {sum(1 for z in stop_hunt_zones if z['hunt_probability']=='高')} 个")
+
     # ── 中间汇总（清算区评分后，回测前）─────────────────
-    max_score = 20   # 原18 + 清算区最多 ±2；回测后再 +2
-    emit(f"\n  [中间得分] {score:+d}/{max_score}（含清算区，待回测修正）")
+    # 基础分：趋势组±3 + BB±2 + 动量组±4 + 成交量组±2 + 清算区±2 + 市场结构±2 + FVG±1 + 猎杀±1 + K线形态±4 = 21
+    max_score = 21   # 回测后 +2，链上 +3
+    emit(f"\n  [中间得分] {score:+d}/{max_score}（含清算区+市场结构+FVG，待回测修正）")
+
+    # ── 链上真假突破过滤器 (On-Chain Fakeout Filter) ──────────────
+    if onchain_monitor:
+        emit(f"\n【链上流动性与真假突破预警 (On-Chain Analysis)】{sep}")
+        # 简单判断当前技术面是否有突破迹象 (可根据当前 price 和关键阻力/支撑判断)
+        tech_signal = "neutral"
+        if resistances and len(resistances) > 0 and price > resistances[0][0] * 0.995:
+            tech_signal = "breakout_up"  # 价格非常接近或已突破第一阻力位
+        elif supports and len(supports) > 0 and price < supports[0][0] * 1.005:
+            tech_signal = "breakdown_down" # 价格非常接近或已跌破第一支撑位
+            
+        onchain_res = onchain_monitor.detect_fakeout(tech_signal)
+        
+        # 稳定币宏观数据展示
+        sc_data = onchain_monitor.get_stablecoin_flows()
+        if "error" not in sc_data:
+            emit(f"  宏观资金面: {sc_data.get('macro_liquidity')} (USDT: ${sc_data.get('usdt_mcap',0)/1e9:.1f}B)")
+            emit(f"  {sc_data.get('desc')}")
+        
+        # 突破验证结论
+        emit(f"  突破验证: {onchain_res.get('desc')}")
+        
+        # 链上共振分计入总分 (最高 ±3 分)
+        onchain_score = onchain_res.get("score", 0)
+        score += onchain_score
+        max_score += 3
+        
+        rd["onchain"] = {
+            "tech_signal_detected": tech_signal,
+            "status": onchain_res.get("status"),
+            "desc": onchain_res.get("desc"),
+            "score": onchain_score,
+            "stablecoin": sc_data
+        }
+    else:
+        rd["onchain"] = None
 
     # ── ATR 风险管理（不参与评分，仅展示）────────────────
     _atr_val = df["atr"].iloc[-1]
@@ -1066,7 +1987,328 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                "overall_color": oc, "action": action,
                "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
 
+    rd["trade_plan"] = _generate_trade_plan(rd)
     return score, "\n".join(lines), rd
+
+
+# ─────────────────────────────────────────────
+# F-1b. 可执行入场方案生成器
+# ─────────────────────────────────────────────
+
+def _generate_trade_plan(rd: dict) -> dict:
+    """
+    基于 generate_report 输出的 rd 字典，生成可执行交易方案。
+    包含：方向判定、入场价位（限价/市价/等待回调）、
+         结构型止损（摆动低/高点优先）、TP1/TP2/TP3、R:R 比率、仓位建议。
+    """
+    score  = rd.get("score", 0) or 0
+    price  = rd.get("price", 0) or 0
+    max_sc = rd.get("max_score", 14) or 14
+    if not price:
+        return {"direction": "wait", "direction_cn": "观望 ↔️",
+                "color": "#f9a825", "reason": "价格数据异常"}
+
+    # ── 方向判定 ─────────────────────────────────────────────
+    if   score >= 5:  direction = "long"
+    elif score <= -5: direction = "short"
+    else:             direction = "wait"
+
+    if direction == "wait":
+        sups = rd.get("supports")  or []
+        ress = rd.get("resistances") or []
+        res1 = ress[0].get("price") if ress else None
+        sup1 = sups[0].get("price") if sups else None
+        return {
+            "direction": "wait", "direction_cn": "观望 ↔️", "color": "#f9a825",
+            "reason": f"综合评分 {score:+d}/{max_sc}，多空信号不明确，建议等待方向确认",
+            "condition_long":  f"突破阻力 {'$'+f'{res1:,.0f}' if res1 else '关键阻力位'} 且评分 ≥ +5 → 转多",
+            "condition_short": f"跌破支撑 {'$'+f'{sup1:,.0f}' if sup1 else '关键支撑位'} 且评分 ≤ −5 → 转空",
+        }
+
+    is_long = (direction == "long")
+
+    # ── 基础数据提取 ──────────────────────────────────────────
+    atr_data = rd.get("atr") or {}
+    atr_val  = float(atr_data.get("val") or 0)
+    atr_pct  = float(atr_data.get("pct") or 0)   # e.g. 1.5 表示 1.5%
+
+    liq_data     = rd.get("liq") or {}
+    liq_sl_long  = liq_data.get("sl_long_opt")
+    liq_sl_short = liq_data.get("sl_short_opt")
+
+    ms_data  = rd.get("market_structure") or {}
+    key_high = (ms_data.get("key_high") or {}).get("price")
+    key_low  = (ms_data.get("key_low")  or {}).get("price")
+
+    vp   = rd.get("volume_profile") or {}
+    poc  = vp.get("poc")
+    vah  = vp.get("vah")
+    val_ = vp.get("val")
+    # HVN 节点：成交量密集区，做多目标优先于普通S/R
+    _hvn_list = [b["price"] for b in (vp.get("chart_bins") or [])
+                 if b.get("is_hvn") and b.get("price")]
+
+    hunt_zones = rd.get("stop_hunt_zones") or []
+
+    # 支撑/阻力按距离排序
+    sup_sorted = sorted(
+        [s for s in (rd.get("supports") or []) if s.get("price", 0) < price],
+        key=lambda x: x["price"], reverse=True   # 最近的在前
+    )
+    res_sorted = sorted(
+        [r for r in (rd.get("resistances") or []) if r.get("price", 0) > price],
+        key=lambda x: x["price"]                 # 最近的在前
+    )
+
+    fib_list  = rd.get("fib") or []
+    fib_above = sorted([f for f in fib_list if f.get("price", 0) > price * 1.003],
+                       key=lambda x: x["price"])
+    fib_below = sorted([f for f in fib_list if f.get("price", 0) < price * 0.997],
+                       key=lambda x: x["price"], reverse=True)
+
+    # ATR 安全兜底
+    if atr_val <= 0:
+        atr_val = price * 0.015
+    if atr_pct <= 0:
+        atr_pct = atr_val / price * 100
+
+    # ── 止损候选优先级辅助 ────────────────────────────────────
+    _prio = {"structural": 0, "liq": 1, "support": 2, "resistance": 2, "atr": 3}
+
+    def _best_sl(candidates):
+        """从候选列表中按优先级选出最合理的止损价"""
+        valid = [(lb, float(sl), tp) for lb, sl, tp in candidates
+                 if sl and price * 0.85 < float(sl) < price * 1.15
+                 and ((is_long and float(sl) < price) or (not is_long and float(sl) > price))]
+        if not valid:
+            return None, None, None
+        return min(valid, key=lambda x: _prio.get(x[2], 9))
+
+    # ── 入场区间检测（是否在 S/R 的 1.5×ATR 范围内）─────────
+    in_range = lambda p: p and abs(price - p) / price < (atr_pct / 100) * 1.5
+
+    # ══════════════════════════════════════════════════════
+    if is_long:
+        # ── 止损（结构型优先）────────────────────────────
+        sl_cands = []
+        if key_low and key_low < price:
+            sl_cands.append(("结构型（摆动低点−0.5ATR）", key_low - 0.5 * atr_val, "structural"))
+        if liq_sl_long:
+            sl_cands.append(("清算区优化止损", liq_sl_long, "liq"))
+        if sup_sorted:
+            sl_cands.append(("最近支撑−0.5ATR", sup_sorted[0]["price"] - 0.5 * atr_val, "support"))
+        sl_cands.append(("ATR×1.5止损", atr_data.get("sl_long") or price - 1.5 * atr_val, "atr"))
+        sl_label, sl_price, sl_type = _best_sl(sl_cands)
+        if sl_price is None:
+            sl_price = round(price - 1.5 * atr_val, 2)
+            sl_label, sl_type = "ATR×1.5止损", "atr"
+        sl_price = round(sl_price, 2)
+        sl_dist_pct = round((price - sl_price) / price * 100, 2)
+
+        # ── 入场价位 ─────────────────────────────────────
+        near_hunt = any(z.get("near_hunt") and z.get("type") == "long_stop_hunt"
+                        for z in hunt_zones)
+        if score >= 8 and not near_hunt:
+            entry_method = "市价追入"
+            entry_price  = price
+            entry_note   = f"动能强劲（评分 {score:+d}），可直接市价入场"
+        elif sup_sorted and in_range(sup_sorted[0]["price"]):
+            entry_price  = round(sup_sorted[0]["price"] * 1.001, 2)
+            entry_method = "限价挂单（支撑区）"
+            entry_note   = f"价格已在支撑 ${sup_sorted[0]['price']:,.0f} 附近，可限价建仓"
+        elif poc and in_range(poc) and poc < price:
+            entry_price  = round(poc, 2)
+            entry_method = "限价挂单（VP POC）"
+            entry_note   = f"价格接近成交量POC ${poc:,.0f}，价值共识买入区"
+        elif sup_sorted:
+            entry_price  = round(sup_sorted[0]["price"] + atr_val * 0.1, 2)
+            entry_method = "等待回调限价"
+            entry_note   = f"建议等回调至支撑 ${sup_sorted[0]['price']:,.0f} 附近再入场"
+        elif val_ and val_ < price:
+            entry_price  = round(val_, 2)
+            entry_method = "等待回调至VA下沿"
+            entry_note   = f"等待回调至价值区间下沿 VAL ${val_:,.0f}"
+        else:
+            entry_price  = price
+            entry_method = "市价（无明显支撑）"
+            entry_note   = "无明显支撑参考位，谨慎控制仓位"
+        entry_price    = round(entry_price, 2)
+        entry_dist_pct = round((price - entry_price) / price * 100, 2)
+
+        # ── 止盈目标 ─────────────────────────────────────
+        tp_raw = []
+        _dedup = lambda p, lst: not any(abs(p - t["price"]) / (p or 1) < 0.006 for t in lst)
+        # 1. 优先用VP关键位：VAH > 价格 = 成交量价值区上沿（机构常用TP）
+        if vah and vah > entry_price * 1.003 and _dedup(vah, tp_raw):
+            tp_raw.append({"price": vah, "label": "VP VAH（价值区上沿）", "badge": "vp_vah"})
+        # 2. VP HVN 节点（成交量节点 = 机构成本区，到达后常有阻力）
+        for _h in sorted([h for h in _hvn_list if h > entry_price * 1.003]):
+            if len(tp_raw) >= 3: break
+            if _dedup(_h, tp_raw):
+                tp_raw.append({"price": _h, "label": "VP HVN（成交量节点）", "badge": "vp_hvn"})
+        # 3. 结构阻力位
+        for r in res_sorted[:3]:
+            if len(tp_raw) >= 3: break
+            if _dedup(r["price"], tp_raw):
+                tp_raw.append({"price": r["price"],
+                               "label": f"阻力位（{r.get('source','pivot').split('+')[0]}）",
+                               "badge": r.get("source", "")})
+        # 4. Fibonacci 延伸位（ext=True优先于回调位）
+        fib_ext_above = sorted([f for f in fib_above if f.get("ext")], key=lambda x: x["price"])
+        fib_ret_above = sorted([f for f in fib_above if not f.get("ext")], key=lambda x: x["price"])
+        for f in fib_ext_above + fib_ret_above:
+            if len(tp_raw) >= 3: break
+            if _dedup(f["price"], tp_raw):
+                tp_raw.append({"price": f["price"], "label": f["label"], "badge": "fib"})
+        # 5. 兜底：固定R倍数
+        for mult in [2.0, 3.0, 4.5]:
+            if len(tp_raw) >= 3: break
+            tp_raw.append({"price": entry_price + mult * (entry_price - sl_price),
+                           "label": f"×{mult:.0f}R 目标", "badge": ""})
+
+        risk = entry_price - sl_price
+        tp_levels = []
+        for i, t in enumerate(sorted(tp_raw, key=lambda x: x["price"])[:3]):
+            rr = round((t["price"] - entry_price) / risk, 2) if risk > 0 else 0
+            tp_levels.append({"tp_label": f"TP{i+1}", "label": t["label"],
+                               "price": round(t["price"], 2),
+                               "dist_pct": round((t["price"] - entry_price) / entry_price * 100, 2),
+                               "source": t.get("badge", ""), "rr": rr})
+
+    # ══════════════════════════════════════════════════════
+    else:  # SHORT
+        # ── 止损（结构型优先）────────────────────────────
+        sl_cands = []
+        if key_high and key_high > price:
+            sl_cands.append(("结构型（摆动高点+0.5ATR）", key_high + 0.5 * atr_val, "structural"))
+        if liq_sl_short:
+            sl_cands.append(("清算区优化止损", liq_sl_short, "liq"))
+        if res_sorted:
+            sl_cands.append(("最近阻力+0.5ATR", res_sorted[0]["price"] + 0.5 * atr_val, "resistance"))
+        sl_cands.append(("ATR×1.5止损", atr_data.get("sl_short") or price + 1.5 * atr_val, "atr"))
+        sl_label, sl_price, sl_type = _best_sl(sl_cands)
+        if sl_price is None:
+            sl_price = round(price + 1.5 * atr_val, 2)
+            sl_label, sl_type = "ATR×1.5止损", "atr"
+        sl_price = round(sl_price, 2)
+        sl_dist_pct = round((sl_price - price) / price * 100, 2)
+
+        # ── 入场价位 ─────────────────────────────────────
+        near_hunt = any(z.get("near_hunt") and z.get("type") == "short_stop_hunt"
+                        for z in hunt_zones)
+        if score <= -8 and not near_hunt:
+            entry_price  = price
+            entry_method = "市价追入"
+            entry_note   = f"动能强劲（评分 {score:+d}），可直接市价做空"
+        elif res_sorted and in_range(res_sorted[0]["price"]):
+            entry_price  = round(res_sorted[0]["price"] * 0.999, 2)
+            entry_method = "限价挂单（阻力区）"
+            entry_note   = f"价格已触及阻力 ${res_sorted[0]['price']:,.0f}，可限价做空"
+        elif poc and in_range(poc) and poc > price:
+            entry_price  = round(poc, 2)
+            entry_method = "限价挂单（VP POC）"
+            entry_note   = f"价格接近成交量POC ${poc:,.0f}，可限价做空"
+        elif res_sorted:
+            entry_price  = round(res_sorted[0]["price"] - atr_val * 0.1, 2)
+            entry_method = "等待反弹限价"
+            entry_note   = f"建议等反弹至阻力 ${res_sorted[0]['price']:,.0f} 附近再做空"
+        elif vah and vah > price:
+            entry_price  = round(vah, 2)
+            entry_method = "等待反弹至VA上沿"
+            entry_note   = f"等待反弹至价值区间上沿 VAH ${vah:,.0f}"
+        else:
+            entry_price  = price
+            entry_method = "市价（无明显阻力）"
+            entry_note   = "无明显阻力参考位，谨慎控制仓位"
+        entry_price    = round(entry_price, 2)
+        entry_dist_pct = round((entry_price - price) / price * 100, 2)
+
+        # ── 止盈目标（做空：优先用VP关键位，再用支撑/Fib）─────
+        tp_raw = []
+        _dedup = lambda p, lst: not any(abs(p - t["price"]) / (p or 1) < 0.006 for t in lst)
+        # 1. VP VAL（价值区下沿）= 空单首要目标
+        if val_ and val_ < entry_price * 0.997 and _dedup(val_, tp_raw):
+            tp_raw.append({"price": val_, "label": "VP VAL（价值区下沿）", "badge": "vp_val"})
+        # 2. VP HVN 节点（下方成交量密集区）
+        for _h in sorted([h for h in _hvn_list if h < entry_price * 0.997], reverse=True):
+            if len(tp_raw) >= 3: break
+            if _dedup(_h, tp_raw):
+                tp_raw.append({"price": _h, "label": "VP HVN（成交量节点）", "badge": "vp_hvn"})
+        # 3. 结构支撑位
+        for s in sup_sorted[:3]:
+            if len(tp_raw) >= 3: break
+            if _dedup(s["price"], tp_raw):
+                tp_raw.append({"price": s["price"],
+                               "label": f"支撑位（{s.get('source','pivot').split('+')[0]}）",
+                               "badge": s.get("source", "")})
+        # 4. Fib 回调位
+        for f in fib_below:
+            if len(tp_raw) >= 3: break
+            if _dedup(f["price"], tp_raw):
+                tp_raw.append({"price": f["price"], "label": f["label"], "badge": "fib"})
+        # 5. 兜底
+        for mult in [2.0, 3.0, 4.5]:
+            if len(tp_raw) >= 3: break
+            tp_raw.append({"price": entry_price - mult * (sl_price - entry_price),
+                           "label": f"×{mult:.0f}R 目标", "badge": ""})
+
+        risk = sl_price - entry_price
+        tp_levels = []
+        for i, t in enumerate(sorted(tp_raw, key=lambda x: x["price"], reverse=True)[:3]):
+            rr = round((entry_price - t["price"]) / risk, 2) if risk > 0 else 0
+            tp_levels.append({"tp_label": f"TP{i+1}", "label": t["label"],
+                               "price": round(t["price"], 2),
+                               "dist_pct": round((entry_price - t["price"]) / entry_price * 100, 2),
+                               "source": t.get("badge", ""), "rr": rr})
+
+    # ── R:R 质量评估 ──────────────────────────────────────────
+    rr1 = tp_levels[0]["rr"] if tp_levels else 0
+    rr_quality = ("优秀 ✅" if rr1 >= 3.0 else
+                  "良好 ✅" if rr1 >= 2.0 else
+                  "勉强 ⚠️" if rr1 >= 1.5 else
+                  "不建议 ❌")
+    recommended = rr1 >= 1.5
+
+    # R:R < 1.2 直接否决：风险收益比过低，不应生成可执行计划
+    if rr1 < 1.2:
+        return {
+            "direction": "wait", "direction_cn": "观望 ↔️", "color": "#f9a825",
+            "reason": (
+                f"R:R 仅 {rr1:.1f}x（< 1.2x 最低门槛）。"
+                f"TP1 {fmt(tp_levels[0]['price']) if tp_levels else '--'} 距入场仅 "
+                f"{tp_levels[0]['dist_pct']:.2f}% ，而止损 {sl_dist_pct:.2f}%，"
+                f"等待更优入场点或价格向TP方向移动后再评估。"
+            ),
+            "rr_tp1": rr1, "rr_quality": rr_quality, "recommended": False,
+            "entry_price": entry_price, "sl_price": sl_price, "tp_levels": tp_levels,
+        }
+
+    # ── 仓位建议（1% 账户风险模型）───────────────────────────
+    risk_pct = sl_dist_pct if sl_dist_pct > 0 else 1.5
+    pos_pct  = min(100, round(1.0 / risk_pct * 100))
+    pos_note = f"按账户 1% 风险：仓位约 {pos_pct}%（止损幅度 {risk_pct:.2f}%）"
+
+    return {
+        "direction":      direction,
+        "direction_cn":   "做多 📈" if is_long else "做空 📉",
+        "color":          "#26a69a" if is_long else "#ef5350",
+        "score":          score,
+        "max_score":      max_sc,
+        "entry_method":   entry_method,
+        "entry_price":    entry_price,
+        "entry_dist_pct": entry_dist_pct,
+        "entry_note":     entry_note,
+        "sl_price":       sl_price,
+        "sl_label":       sl_label,
+        "sl_type":        sl_type,
+        "sl_dist_pct":    sl_dist_pct,
+        "tp_levels":      tp_levels,
+        "rr_tp1":         rr1,
+        "rr_quality":     rr_quality,
+        "recommended":    recommended,
+        "position_note":  pos_note,
+        "near_hunt_warn": near_hunt,
+    }
 
 
 # ─────────────────────────────────────────────
