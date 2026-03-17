@@ -196,6 +196,32 @@ def fetch_ob_walls(symbol: str, depth_limit: int = 1000):
     return walls, data
 
 
+def fetch_open_interest(symbol: str) -> dict:
+    """
+    获取 Binance 合约当前持仓量 + 48小时历史趋势（1h间隔）。
+    返回 {"current": float, "history": [...]} 或 {}
+    """
+    try:
+        r1 = req.get(
+            "https://fapi.binance.com/fapi/v1/openInterest",
+            params={"symbol": symbol}, timeout=5,
+        )
+        r1.raise_for_status()
+        cur_oi = float(r1.json()["openInterest"])
+
+        r2 = req.get(
+            "https://fapi.binance.com/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": "1h", "limit": 48}, timeout=5,
+        )
+        r2.raise_for_status()
+        hist = r2.json()
+
+        return {"current": cur_oi, "history": hist}
+    except Exception as e:
+        print(f"[OI] fetch_open_interest {symbol} 失败: {e}")
+        return {}
+
+
 # 各币种压力指数历史快照（用于计算速度/趋势）
 _ob_pressure_history = {s: collections.deque(maxlen=5) for s in SYMBOLS}
 
@@ -253,7 +279,7 @@ def calculate_ob_pressure(bids: list, asks: list, ref_dist_pct: float = 0.01) ->
 
 
 def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
-                  ob_walls=None, liq_clusters=None):
+                  ob_walls=None, liq_clusters=None, oi_data=None):
     """分析单个周期，返回 {rd, candles, supports, resistances, fib}"""
     # ── 主数据（500根，用于指标计算、图表、S/R）──────────
     df = fetch_data(symbol=symbol, interval=interval, limit=limit)
@@ -323,6 +349,7 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
             market_structure=ms_data,
             fvg_zones=fvg_data,
             volume_profile=vp_data,
+            oi_data=oi_data if oi_data else None,
         )
 
     # 准备图表用的 K 线数据（带指标值）
@@ -420,6 +447,11 @@ def _analyze_symbol(symbol: str) -> None:
                 ob_pressure_now["velocity"] = 0.0
             print(f"[服务器] {symbol} OB压力指数: ratio={ob_pressure_now['ratio']} score={ob_pressure_now['score']} v={ob_pressure_now['velocity']}")
 
+    # ── 持仓量（OI）快照 ─────────────────────────────────────
+    oi_data = fetch_open_interest(symbol)
+    if oi_data.get("current"):
+        print(f"[服务器] {symbol} OI: {oi_data['current']:,.0f} BTC")
+
     # 拉取最近 24h 清算数据（先取 WS 真实数据，不足则用估算兜底）
     liq_clusters_now = get_liq_clusters(symbol, hours=24, top_n=10)
     if not liq_clusters_now:
@@ -444,7 +476,8 @@ def _analyze_symbol(symbol: str) -> None:
         try:
             result = run_single_tf(symbol, interval, limit, label,
                                    chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
-                                   ob_walls=ob_walls, liq_clusters=liq_clusters_now)
+                                   ob_walls=ob_walls, liq_clusters=liq_clusters_now,
+                                   oi_data=oi_data)
             if result:
                 result["_fetched_at"] = now_ts
                 new_tf[interval] = result

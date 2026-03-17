@@ -242,6 +242,10 @@ def calculate_indicators(df: pd.DataFrame, tf_interval: str = "") -> pd.DataFram
     df["adx_pos"] = adx_ind.adx_pos()   # DI+
     df["adx_neg"] = adx_ind.adx_neg()   # DI-
 
+    # ── ADX 斜率（5根K线变化量）→ 趋势是在强化还是衰减 ──────────────────
+    # 正值 = ADX 上升（趋势增强）；负值 = ADX 下降（趋势减弱 / 即将震荡）
+    df["adx_slope"] = df["adx"].diff(5)
+
     # 将自适应参数存入 DataFrame.attrs（供 generate_report 读取）
     df.attrs["high_vol"]     = bool(high_vol)
     df.attrs["bb_dev"]       = bb_dev
@@ -1039,7 +1043,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                     fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True,
                     liq_clusters: list = None, df_backtest: pd.DataFrame = None,
                     market_structure: dict = None, fvg_zones: list = None,
-                    volume_profile: dict = None):
+                    volume_profile: dict = None, oi_data: dict = None):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -1064,13 +1068,22 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     rd["tf"]    = tf_label
 
     # ── 市场机制识别 ─────────────────────────────────────
-    adx_val  = latest["adx"]     if "adx"     in df.columns else np.nan
-    di_plus  = latest["adx_pos"] if "adx_pos" in df.columns else np.nan
-    di_minus = latest["adx_neg"] if "adx_neg" in df.columns else np.nan
+    adx_val  = latest["adx"]      if "adx"      in df.columns else np.nan
+    di_plus  = latest["adx_pos"]  if "adx_pos"  in df.columns else np.nan
+    di_minus = latest["adx_neg"]  if "adx_neg"  in df.columns else np.nan
+    adx_slope_val = latest["adx_slope"] if "adx_slope" in df.columns else np.nan
     high_vol     = df.attrs.get("high_vol",     False)
     bb_dev       = df.attrs.get("bb_dev",       2.0)
     rsi_win      = df.attrs.get("rsi_win",      14)
     atr_pct_rank = df.attrs.get("atr_pct_rank", 0.5)
+
+    # ADX 斜率方向：正 = 趋势增强，负 = 趋势减弱
+    if not pd.isna(adx_slope_val):
+        if   adx_slope_val >  1.5: adx_trend = "rising"    # 趋势在加速
+        elif adx_slope_val < -1.5: adx_trend = "falling"   # 趋势在衰减
+        else:                      adx_trend = "flat"
+    else:
+        adx_trend = "unknown"
 
     if not pd.isna(adx_val):
         if adx_val >= 25:   regime = "trending"
@@ -1078,6 +1091,10 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         else:               regime = "transitional"
     else:
         regime = "unknown"
+
+    # ADX 衰减修正：趋势市但 ADX 明显下降 → 降级为 transitional，避免按趋势市过度放大 MA 权重
+    if regime == "trending" and adx_trend == "falling" and not pd.isna(adx_val) and adx_val < 30:
+        regime = "transitional"   # 趋势减弱，临界区间，保守处理
 
     # ── 均线 ──
     emit(f"【均线系统】{sep}")
@@ -1587,16 +1604,34 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         fib_out.append({"label": label, "price": fp, "dist_pct": dist, "near": abs(dist) < 2, "ext": is_ext})
     rd["fib"] = fib_out
 
+    # ── ADX 斜率评分修正（趋势衰减 → 对动量组小幅惩罚）────────────────
+    adx_slope_score = 0
+    if adx_trend == "falling" and regime in ("trending", "transitional"):
+        adx_slope_score = -1   # 趋势减弱，顺势动量信号可靠性下降
+        score += adx_slope_score
+        emit(f"\n  [ADX趋势衰减] ADX斜率 {adx_slope_val:+.1f}（过去5根K线），趋势正在减弱 → 评分修正 {adx_slope_score:+d}")
+    elif adx_trend == "rising" and regime == "trending":
+        adx_slope_score = +1   # 趋势加速，顺势信号更可信
+        score += adx_slope_score
+        emit(f"\n  [ADX趋势增强] ADX斜率 {adx_slope_val:+.1f}（过去5根K线），趋势正在加速 → 评分修正 {adx_slope_score:+d}")
+
+    _adx_trend_cn = {"rising": "上升↑ 趋势增强", "falling": "下降↓ 趋势衰减",
+                     "flat": "平稳 趋势稳定", "unknown": "未知"}.get(adx_trend, "")
+
     # ── 市场机制写入 rd ──────────────────────────────────
     rd["regime"] = {
-        "adx":          round(float(adx_val), 2)  if not pd.isna(adx_val)  else None,
-        "di_plus":      round(float(di_plus),  2)  if not pd.isna(di_plus)  else None,
-        "di_minus":     round(float(di_minus), 2)  if not pd.isna(di_minus) else None,
-        "type":         regime,
-        "high_vol":     high_vol,
-        "bb_dev":       bb_dev,
-        "rsi_win":      rsi_win,
-        "atr_pct_rank": round(atr_pct_rank, 2),
+        "adx":           round(float(adx_val),       2) if not pd.isna(adx_val)       else None,
+        "adx_slope":     round(float(adx_slope_val), 2) if not pd.isna(adx_slope_val) else None,
+        "adx_trend":     adx_trend,
+        "adx_trend_cn":  _adx_trend_cn,
+        "di_plus":       round(float(di_plus),  2)  if not pd.isna(di_plus)  else None,
+        "di_minus":      round(float(di_minus), 2)  if not pd.isna(di_minus) else None,
+        "type":          regime,
+        "high_vol":      high_vol,
+        "bb_dev":        bb_dev,
+        "rsi_win":       rsi_win,
+        "atr_pct_rank":  round(atr_pct_rank, 2),
+        "adx_slope_score": adx_slope_score,
     }
 
     # ── 清算密集区分析（参与评分）────────────────────────────────────
@@ -1853,8 +1888,8 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     emit(f"  共 {len(stop_hunt_zones)} 个猎杀区，高磁力 {sum(1 for z in stop_hunt_zones if z['hunt_probability']=='高')} 个")
 
     # ── 中间汇总（清算区评分后，回测前）─────────────────
-    # 基础分：趋势组±3 + BB±2 + 动量组±4 + 成交量组±2 + 清算区±2 + 市场结构±2 + FVG±1 + 猎杀±1 + K线形态±4 = 21
-    max_score = 21   # 回测后 +2，链上 +3
+    # 基础分：趋势组±3 + BB±2 + 动量组±4 + 成交量组±2 + 清算区±2 + 市场结构±2 + FVG±1 + 猎杀±1 + K线形态±4 + ADX斜率±1 = 22
+    max_score = 22   # 回测后 +2，链上 +3，OI后 +2（动态扩展）
     emit(f"\n  [中间得分] {score:+d}/{max_score}（含清算区+市场结构+FVG，待回测修正）")
 
     # ── 链上真假突破过滤器 (On-Chain Fakeout Filter) ──────────────
@@ -1892,6 +1927,72 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         }
     else:
         rd["onchain"] = None
+
+    # ── 持仓量 OI 评分 ──────────────────────────────────────
+    emit(f"\n【持仓量变化 (Open Interest)】{sep}")
+    if oi_data and oi_data.get("history"):
+        try:
+            hist     = oi_data["history"]
+            oi_vals  = [float(h["sumOpenInterest"]) for h in hist if "sumOpenInterest" in h]
+            cur_oi   = oi_data.get("current") or (oi_vals[-1] if oi_vals else None)
+
+            if cur_oi and len(oi_vals) >= 6:
+                avg_oi      = sum(oi_vals) / len(oi_vals)
+                oi_chg_pct  = (cur_oi - avg_oi) / avg_oi * 100
+
+                # 价格趋势：近 4 根 K 线收益（≈ 与 OI 的 1h 数据时间尺度对应）
+                _p_start    = float(df["close"].iloc[-5]) if len(df) >= 5 else price
+                price_chg   = (price - _p_start) / _p_start * 100
+
+                if   oi_chg_pct >  1.5: oi_trend = "rising"
+                elif oi_chg_pct < -1.5: oi_trend = "falling"
+                else:                   oi_trend = "flat"
+
+                if   price_chg >  0.5: price_trend = "up"
+                elif price_chg < -0.5: price_trend = "down"
+                else:                  price_trend = "flat"
+
+                # 组合评分：OI 与价格方向的语义
+                if   oi_trend == "rising"  and price_trend == "up":
+                    oi_score = 2;  oi_signal = "多头加仓，趋势延续"
+                elif oi_trend == "rising"  and price_trend == "down":
+                    oi_score = -2; oi_signal = "空头加仓，下跌有效"
+                elif oi_trend == "falling" and price_trend == "up":
+                    oi_score = 1;  oi_signal = "空头平仓拉升，力度偏弱"
+                elif oi_trend == "falling" and price_trend == "down":
+                    oi_score = -1; oi_signal = "多头平仓下跌，力度偏弱"
+                else:
+                    oi_score = 0;  oi_signal = "持仓量与价格方向不明确"
+
+                oi_score = max(-2, min(2, oi_score))
+                score    += oi_score
+                max_score += 2
+
+                # 当前 OI 换算为 USDT（用于猎杀区磁力计算）
+                oi_usdt_est = cur_oi * price
+
+                emit(f"  当前OI: {cur_oi:,.0f} BTC (≈${oi_usdt_est/1e9:.1f}B)  48h均值变化: {oi_chg_pct:+.2f}%")
+                emit(f"  OI趋势: {oi_trend}  价格趋势: {price_trend}  信号: {oi_signal}")
+                emit(f"  OI评分: {oi_score:+d}")
+
+                rd["oi"] = {
+                    "current":     round(cur_oi, 2),
+                    "chg_pct":     round(oi_chg_pct, 3),
+                    "trend":       oi_trend,
+                    "price_trend": price_trend,
+                    "score":       oi_score,
+                    "signal":      oi_signal,
+                    "usdt_b":      round(oi_usdt_est / 1e9, 2),
+                }
+            else:
+                emit("  OI 历史数据不足，跳过评分")
+                rd["oi"] = None
+        except Exception as e:
+            emit(f"  OI 分析异常: {e}")
+            rd["oi"] = None
+    else:
+        emit("  无 OI 数据")
+        rd["oi"] = None
 
     # ── ATR 风险管理（不参与评分，仅展示）────────────────
     _atr_val = df["atr"].iloc[-1]
@@ -1970,16 +2071,20 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         rd["confidence_level"] = "未知"
 
     # ── 综合信号最终更新（含回测评分后重算 overall）────────
-    if score >= 5:
-        overall = f"偏多头  (得分: {score:+d}/{max_score})"
+    # 动态阈值：避免 max_score 增大后误报率上升
+    # 目标：约 33% 置信度门槛，向上取整，最低不低于 5
+    _sig_threshold = max(5, round(max_score * 0.33))
+    rd["sig_threshold"] = _sig_threshold
+    if score >= _sig_threshold:
+        overall = f"偏多头  (得分: {score:+d}/{max_score}，阈值 ≥+{_sig_threshold})"
         oc      = "#26a69a"
         action  = "做多 / 买入"
-    elif score <= -5:
-        overall = f"偏空头  (得分: {score:+d}/{max_score})"
+    elif score <= -_sig_threshold:
+        overall = f"偏空头  (得分: {score:+d}/{max_score}，阈值 ≤-{_sig_threshold})"
         oc      = "#ef5350"
         action  = "做空 / 卖出"
     else:
-        overall = f"中性震荡  (得分: {score:+d}/{max_score})"
+        overall = f"中性震荡  (得分: {score:+d}/{max_score}，阈值 ±{_sig_threshold})"
         oc      = "#f9a825"
         action  = "观望 / 高抛低吸"
 
@@ -2008,10 +2113,11 @@ def _generate_trade_plan(rd: dict) -> dict:
         return {"direction": "wait", "direction_cn": "观望 ↔️",
                 "color": "#f9a825", "reason": "价格数据异常"}
 
-    # ── 方向判定 ─────────────────────────────────────────────
-    if   score >= 5:  direction = "long"
-    elif score <= -5: direction = "short"
-    else:             direction = "wait"
+    # ── 方向判定（动态阈值，与 generate_report 保持一致）───────────────
+    _thresh = rd.get("sig_threshold") or max(5, round(max_sc * 0.33))
+    if   score >= _thresh:  direction = "long"
+    elif score <= -_thresh: direction = "short"
+    else:                   direction = "wait"
 
     if direction == "wait":
         sups = rd.get("supports")  or []
@@ -2020,9 +2126,9 @@ def _generate_trade_plan(rd: dict) -> dict:
         sup1 = sups[0].get("price") if sups else None
         return {
             "direction": "wait", "direction_cn": "观望 ↔️", "color": "#f9a825",
-            "reason": f"综合评分 {score:+d}/{max_sc}，多空信号不明确，建议等待方向确认",
-            "condition_long":  f"突破阻力 {'$'+f'{res1:,.0f}' if res1 else '关键阻力位'} 且评分 ≥ +5 → 转多",
-            "condition_short": f"跌破支撑 {'$'+f'{sup1:,.0f}' if sup1 else '关键支撑位'} 且评分 ≤ −5 → 转空",
+            "reason": f"综合评分 {score:+d}/{max_sc}，多空信号不明确，建议等待方向确认（阈值 ±{_thresh}）",
+            "condition_long":  f"突破阻力 {'$'+f'{res1:,.0f}' if res1 else '关键阻力位'} 且评分 ≥ +{_thresh} → 转多",
+            "condition_short": f"跌破支撑 {'$'+f'{sup1:,.0f}' if sup1 else '关键支撑位'} 且评分 ≤ −{_thresh} → 转空",
         }
 
     is_long = (direction == "long")
