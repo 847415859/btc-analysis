@@ -65,9 +65,12 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 # 全局配置
 # ─────────────────────────────────────────────
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
-# SYMBOLS = ["BTCUSDT"]
+# SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "PAXGUSDT"]
+SYMBOLS = ["BTCUSDT"]
 REFRESH_INTERVAL = 300  # 5 分钟
+
+# 有 Binance 永续合约的品种（可用 fapi / OI / 资金费率 / 期货深度）
+FUTURES_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
 
 # 缓存结构:
 # _cache = {
@@ -153,15 +156,17 @@ _OB_TF_WEIGHTS = {
 
 def fetch_ob_walls(symbol: str, depth_limit: int = 1000):
     """
-    从 Binance 期货深度接口获取挂单墙 + 原始深度数据。
-    返回 (walls, raw_data)：
-      walls    = [(price, weight, side), ...] 显著挂单墙列表
-      raw_data = {"bids": [[price, qty], ...], "asks": [...]} 原始数据供压力指数计算
-    出错时返回 ([], None)。
+    获取挂单墙 + 原始深度数据。
+    有合约的品种用期货深度（fapi），其余用现货深度（spot）。
+    返回 (walls, raw_data)，出错时返回 ([], None)。
     """
+    if symbol in FUTURES_SYMBOLS:
+        url = "https://fapi.binance.com/fapi/v1/depth"
+    else:
+        url = "https://api.binance.com/api/v3/depth"
     try:
         r = req.get(
-            "https://fapi.binance.com/fapi/v1/depth",
+            url,
             params={"symbol": symbol, "limit": depth_limit},
             timeout=5,
         )
@@ -201,6 +206,8 @@ def fetch_open_interest(symbol: str) -> dict:
     获取 Binance 合约当前持仓量 + 48小时历史趋势（1h间隔）。
     返回 {"current": float, "history": [...]} 或 {}
     """
+    if symbol not in FUTURES_SYMBOLS:
+        return {}   # 现货/非合约品种无持仓量数据
     try:
         r1 = req.get(
             "https://fapi.binance.com/fapi/v1/openInterest",
@@ -223,7 +230,7 @@ def fetch_open_interest(symbol: str) -> dict:
 
 
 # 各币种压力指数历史快照（用于计算速度/趋势）
-_ob_pressure_history = {s: collections.deque(maxlen=5) for s in SYMBOLS}
+_ob_pressure_history = collections.defaultdict(lambda: collections.deque(maxlen=5))
 
 
 def calculate_ob_pressure(bids: list, asks: list, ref_dist_pct: float = 0.01) -> dict:
@@ -279,13 +286,15 @@ def calculate_ob_pressure(bids: list, asks: list, ref_dist_pct: float = 0.01) ->
 
 
 def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
-                  ob_walls=None, liq_clusters=None, oi_data=None):
+                  ob_walls=None, liq_clusters=None, oi_data=None, htf_direction="neutral"):
     """分析单个周期，返回 {rd, candles, supports, resistances, fib}"""
     # ── 主数据（500根，用于指标计算、图表、S/R）──────────
     df = fetch_data(symbol=symbol, interval=interval, limit=limit)
     if df.empty:
         return None
     df = calculate_indicators(df, tf_interval=interval)
+    # P0-3: 传递 ADX 给 find_support_resistance 用于 Pivot 降权
+    adx_val_for_sr = float(df["adx"].iloc[-1]) if "adx" in df.columns and not pd.isna(df["adx"].iloc[-1]) else None
 
     # ── 回测专用扩展历史数据（1500根，提升样本量）──────────
     # 日线/周线本身数据量足够且拉取慢，直接复用 df；短周期单独拉
@@ -335,6 +344,7 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
         cluster_pct=sr_cluster_pct, ob_levels=ob_levels,
         liq_levels=liq_levels_tf if liq_levels_tf else None,
         vp_data=vp_data, fvg_zones=fvg_data,
+        adx_val=adx_val_for_sr,           # P0-3: Pivot ADX 降权
     )
     fib_levels, fib_high, fib_low = calculate_fibonacci(df, lookback=fib_lb)
 
@@ -350,6 +360,7 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
             fvg_zones=fvg_data,
             volume_profile=vp_data,
             oi_data=oi_data if oi_data else None,
+            htf_direction=htf_direction,  # P0-2: HTF 门控
         )
 
     # 准备图表用的 K 线数据（带指标值）
@@ -461,29 +472,78 @@ def _analyze_symbol(symbol: str) -> None:
     if liq_clusters_now:
         print(f"[服务器] {symbol} 清算密集区: {len(liq_clusters_now)} 个 (来源: {liq_clusters_now[0].get('source','?')})")
 
+    # ── P0-2: 第一轮——先跑 HTF（1d/1w），提取大方向，再跑 LTF ──────
+    HTF_INTERVALS = {"1d", "1w"}
+    htf_result    = {}
+
     for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
+        if interval not in HTF_INTERVALS:
+            continue
+        cached = cur_tf.get(interval, {})
+        age    = now_ts - cached.get("_fetched_at", 0)
+        ttl    = _TF_TTL.get(interval, 300)
+        if age < ttl:
+            htf_result[interval] = cached
+            new_tf[interval]     = cached
+            skipped.append(interval)
+        else:
+            _rate_limiter.acquire(1)
+            try:
+                result = run_single_tf(symbol, interval, limit, label,
+                                       chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
+                                       ob_walls=ob_walls, liq_clusters=liq_clusters_now,
+                                       oi_data=oi_data, htf_direction="neutral")
+                if result:
+                    result["_fetched_at"] = now_ts
+                    htf_result[interval]  = result
+                    new_tf[interval]      = result
+                    fetched.append(interval)
+                elif cached:
+                    htf_result[interval] = cached
+                    new_tf[interval]     = cached
+            except Exception as e:
+                print(f"[服务器] {symbol} {label} 分析失败: {e}")
+                if cached:
+                    htf_result[interval] = cached
+                    new_tf[interval]     = cached
+
+    # 计算 HTF 方向（日线权重 0.7，周线权重 0.3）
+    _daily_rd     = (htf_result.get("1d") or {}).get("rd") or {}
+    _weekly_rd    = (htf_result.get("1w") or {}).get("rd") or {}
+    _daily_score  = _daily_rd.get("score",  0) or 0
+    _weekly_score = _weekly_rd.get("score", 0) or 0
+    _htf_raw      = _daily_score * 0.7 + _weekly_score * 0.3
+    if   _htf_raw >=  4: htf_direction = "bull"
+    elif _htf_raw <= -4: htf_direction = "bear"
+    else:                htf_direction = "neutral"
+    print(f"[MTF] {symbol} HTF方向: {htf_direction} "
+          f"(日线{_daily_score:+d}×0.7 + 周线{_weekly_score:+d}×0.3 = {_htf_raw:+.1f})")
+
+    # ── 第二轮——LTF 传入 htf_direction，门控在 generate_report 内部生效 ──
+    for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
+        if interval in HTF_INTERVALS:
+            continue   # 已在第一轮处理
         cached = cur_tf.get(interval, {})
         age    = now_ts - cached.get("_fetched_at", 0)
         ttl    = _TF_TTL.get(interval, 300)
 
         if age < ttl:
-            # 数据仍在有效期内，直接复用，不消耗 API 配额
             new_tf[interval] = cached
             skipped.append(interval)
             continue
 
-        _rate_limiter.acquire(1)   # 每次 K 线请求消耗 1 个令牌
+        _rate_limiter.acquire(1)
         try:
             result = run_single_tf(symbol, interval, limit, label,
                                    chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
                                    ob_walls=ob_walls, liq_clusters=liq_clusters_now,
-                                   oi_data=oi_data)
+                                   oi_data=oi_data, htf_direction=htf_direction)
             if result:
                 result["_fetched_at"] = now_ts
                 new_tf[interval] = result
                 fetched.append(interval)
             elif cached:
-                new_tf[interval] = cached   # 失败时保留旧数据
+                new_tf[interval] = cached
         except Exception as e:
             print(f"[服务器] {symbol} {label} 分析失败: {e}")
             if cached:
@@ -494,17 +554,8 @@ def _analyze_symbol(symbol: str) -> None:
     if fetched:
         print(f"[服务器] {symbol} 已更新: {', '.join(fetched)}")
 
-    # ── P0-B: MTF 多时间框架方向对齐过滤 ─────────────────────
-    # 用日线+周线定大方向，低周期信号与大方向冲突时降低置信度
-    _daily_rd  = (new_tf.get("1d") or {}).get("rd") or {}
-    _weekly_rd = (new_tf.get("1w") or {}).get("rd") or {}
-    _daily_score  = _daily_rd.get("score",  0) or 0
-    _weekly_score = _weekly_rd.get("score", 0) or 0
-    _htf_raw = _daily_score * 0.7 + _weekly_score * 0.3
-    if   _htf_raw >=  4: _htf_dir = "bull"
-    elif _htf_raw <= -4: _htf_dir = "bear"
-    else:                _htf_dir = "neutral"
-
+    # ── MTF 共振展示（门控已在 generate_report 内实现，此处仅注释信息）──
+    # htf_direction / _htf_raw / _daily_score / _weekly_score 均已在上方计算
     _MTF_FILTER_SET = {"15m", "30m", "1h", "2h", "4h", "8h"}
     for _tf_interval, _tf_data in new_tf.items():
         if _tf_interval not in _MTF_FILTER_SET:
@@ -513,51 +564,40 @@ def _analyze_symbol(symbol: str) -> None:
         if not _rd:
             continue
         _ltf_score = _rd.get("score", 0) or 0
-        _max_s     = _rd.get("max_score", 14) or 14
-        _penalty   = 0
         _mtf_note  = ""
 
-        if _htf_dir == "bull" and _ltf_score < -2:
-            _penalty  = +2
-            _mtf_note = f"⚠️ MTF逆向: 日线偏多(HTF={_htf_raw:+.1f})，空信号可靠性降低 {_penalty:+d}"
-        elif _htf_dir == "bear" and _ltf_score > +2:
-            _penalty  = -2
-            _mtf_note = f"⚠️ MTF逆向: 日线偏空(HTF={_htf_raw:+.1f})，多信号可靠性降低 {_penalty:+d}"
-        elif _htf_dir != "neutral":
-            _sign = "↑" if _htf_dir == "bull" else "↓"
+        if htf_direction == "bull" and _ltf_score < -2:
+            _mtf_note = f"⚠️ MTF逆向: 日线偏多(HTF={_htf_raw:+.1f})，空信号已被HTF门控处理"
+        elif htf_direction == "bear" and _ltf_score > +2:
+            _mtf_note = f"⚠️ MTF逆向: 日线偏空(HTF={_htf_raw:+.1f})，多信号已被HTF门控处理"
+        elif htf_direction != "neutral":
+            _sign = "↑" if htf_direction == "bull" else "↓"
             _mtf_note = f"✅ MTF共振: 日线{_sign}(HTF={_htf_raw:+.1f})，信号方向一致"
 
         _rd["mtf_bias"] = {
-            "htf_direction": _htf_dir,
+            "htf_direction": htf_direction,
             "htf_raw":       round(_htf_raw, 2),
             "daily_score":   _daily_score,
             "weekly_score":  _weekly_score,
-            "penalty":       _penalty,
             "note":          _mtf_note,
         }
 
-        if _penalty != 0:
-            _adj = _ltf_score + _penalty
-            _rd["score"] = _adj
-            if   _adj >=  5: _rd["overall"] = f"偏多头  (得分: {_adj:+d}/{_max_s}) [MTF修正]"; _rd["overall_color"] = "#26a69a"; _rd["action"] = "做多 / 买入"
-            elif _adj <= -5: _rd["overall"] = f"偏空头  (得分: {_adj:+d}/{_max_s}) [MTF修正]"; _rd["overall_color"] = "#ef5350"; _rd["action"] = "做空 / 卖出"
-            else:            _rd["overall"] = f"中性震荡  (得分: {_adj:+d}/{_max_s}) [MTF修正]"; _rd["overall_color"] = "#f9a825"; _rd["action"] = "观望 / 高抛低吸"
-            print(f"[MTF] {symbol} {_tf_interval}: 原分{_ltf_score:+d} → {_adj:+d} | {_mtf_note}")
-            # 当HTF方向与LTF信号严重冲突时，降级trade_plan为观望
-            _tp = _rd.get("trade_plan") or {}
-            _tp_dir = _tp.get("direction")
-            _is_conflict = ((_htf_dir == "bear" and _tp_dir == "long") or
-                            (_htf_dir == "bull" and _tp_dir == "short"))
-            if _is_conflict:
-                _rd["trade_plan"] = {
-                    **_tp,
-                    "recommended": False,
-                    "htf_conflict": True,
-                    "htf_conflict_note": (
-                        f"⚠️ HTF过滤: 大周期方向{'偏空' if _htf_dir=='bear' else '偏多'}(日线{_daily_score:+d}/周线{_weekly_score:+d})，"
-                        f"当前{_tf_interval}{'做多' if _tp_dir=='long' else '做空'}信号属逆势操作，胜率大幅降低"
-                    ),
-                }
+        # 当HTF方向与LTF trade_plan严重冲突时，降级为观望（纯展示，不改分数）
+        _tp = _rd.get("trade_plan") or {}
+        _tp_dir = _tp.get("direction")
+        _is_conflict = ((htf_direction == "bear" and _tp_dir == "long") or
+                        (htf_direction == "bull" and _tp_dir == "short"))
+        if _is_conflict:
+            _rd["trade_plan"] = {
+                **_tp,
+                "recommended": False,
+                "htf_conflict": True,
+                "htf_conflict_note": (
+                    f"⚠️ HTF过滤: 大周期方向{'偏空' if htf_direction=='bear' else '偏多'}"
+                    f"(日线{_daily_score:+d}/周线{_weekly_score:+d})，"
+                    f"当前{_tf_interval}{'做多' if _tp_dir=='long' else '做空'}信号属逆势操作，胜率大幅降低"
+                ),
+            }
 
     now = datetime.now()
     with _lock:
@@ -1414,6 +1454,18 @@ def _fetch_basis(symbol: str) -> dict:
 def funding_data():
     """资金费率 + 持仓量（合约市场实时数据，含历史 + 情绪分析）"""
     symbol = request.args.get("symbol", "BTCUSDT")
+
+    # 现货/非合约品种无资金费率，直接返回空结构
+    if symbol not in FUTURES_SYMBOLS:
+        return jsonify({
+            "symbol": symbol, "funding_rate": None, "next_funding_time": None,
+            "open_interest": None, "open_interest_usdt": None,
+            "historical": [], "oi_history": [], "analysis": None,
+            "oi_analysis": None, "liquidation_clusters": [],
+            "fr_advanced": {}, "basis": {},
+            "note": "现货品种无合约数据",
+        })
+
     result = {
         "symbol":               symbol,
         "funding_rate":         None,

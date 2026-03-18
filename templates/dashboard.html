@@ -469,7 +469,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* ══════════════════════════════════════════════════════
    全局配置
 ══════════════════════════════════════════════════════ */
-const SYMBOLS   = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT'];
+const SYMBOLS   = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','PAXGUSDT'];
+const SYMBOL_NAMES = {
+  'BTCUSDT':  '₿ BTC/USDT',
+  'ETHUSDT':  'Ξ ETH/USDT',
+  'SOLUSDT':  '◎ SOL/USDT',
+  'BNBUSDT':  '◆ BNB/USDT',
+  'PAXGUSDT': '🥇 黄金 PAXG',
+};
 const TF_LIST   = ['15m','30m','1h','2h','4h','8h','1d','1w'];
 const TF_LABELS = {'15m':'15分','30m':'30分','1h':'1H','2h':'2H','4h':'4H','8h':'8H','1d':'日','1w':'周'};
 const TF_LABELS_FULL = {'15m':'15分钟','30m':'30分钟','1h':'1小时','2h':'2小时','4h':'4小时','8h':'8小时','1d':'日线','1w':'周线'};
@@ -535,7 +542,7 @@ function initSymbolSelects() {
     if (!sel) return;
     SYMBOLS.forEach(s => {
       const opt = document.createElement('option');
-      opt.value = s; opt.textContent = s; sel.appendChild(opt);
+      opt.value = s; opt.textContent = SYMBOL_NAMES[s] || s; sel.appendChild(opt);
     });
     sel.value = currentSymbol;
     sel.onchange = e => {
@@ -2530,7 +2537,7 @@ function buildOICard(rd) {
       <span style="margin-left:8px;font-size:15px;font-weight:700;color:${scoreClr}">${score >= 0 ? '+' : ''}${score}</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--text2)">
-      <div>当前OI <span style="color:#d1d4dc;font-weight:600">${oi.current?.toLocaleString() ?? '-'} BTC</span></div>
+      <div>当前OI <span style="color:#d1d4dc;font-weight:600">${oi.current?.toLocaleString() ?? '-'} ${rd.asset||'BTC'}</span></div>
       <div>约 <span style="color:#d1d4dc;font-weight:600">$${oi.usdt_b ?? '-'}B</span></div>
       <div>OI趋势 <span style="color:${trendClr};font-weight:600">${trendIcon} ${oi.trend}</span></div>
       <div>价格趋势 <span style="color:var(--text1);font-weight:600">${priceIcon} ${oi.price_trend}</span></div>
@@ -2652,12 +2659,17 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
   const bearW = Math.max(0,-rd.score) / rd.max_score * 100;
   const oc    = rd.overall_color || 'var(--neutral)';
   const maTotal = (rd.ma||[]).reduce((s,m) => s+(m.above?1:-1), 0);
+  // 品种显示名（含 emoji）
+  const _symDisplay = SYMBOL_NAMES[currentSymbol] || currentSymbol;
+  // 是否为无合约数据的现货品种（黄金等）
+  const _isFuturesSymbol = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT'].includes(currentSymbol);
+
   return `
     ${buildTradePlanCard(rd)}
     ${buildComprehensiveOpinion(rd, funding)}
     ${buildMTFMatrix()}
     <div class="card">
-      <div class="card-title">综合信号 [${TF_LABELS_FULL[tf]||tf}]</div>
+      <div class="card-title">综合信号 · <span style="color:var(--accent)">${_symDisplay}</span> [${TF_LABELS_FULL[tf]||tf}]</div>
       ${buildRegimeBadge(rd)}
       ${buildSignalDimensionCard(rd)}
       <div class="overall-box" style="border-left-color:${oc}">
@@ -2904,9 +2916,17 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
       </div>
     </div>` : ''}
     ${buildOBPressureCard(obPressure)}
-    ${buildFundingCard(funding, rd)}
+    ${_isFuturesSymbol
+      ? buildFundingCard(funding, rd)
+      : `<div class="card"><div class="card-title">资金费率 / 持仓量</div>
+           <div style="color:var(--text3);font-size:12px;padding:6px 0">
+             ${_symDisplay} 为现货品种，无合约资金费率数据</div></div>`}
     ${buildMarketStructureCard(rd)}
-    ${buildOICard(rd)}
+    ${_isFuturesSymbol
+      ? buildOICard(rd)
+      : `<div class="card"><div class="card-title">持仓量 (OI)</div>
+           <div style="color:var(--text3);font-size:12px;padding:6px 0">
+             ${_symDisplay} 为现货品种，无合约持仓量数据</div></div>`}
     ${buildOnChainCard(rd)}
     ${buildOnChainRealCard()}
     ${buildVolumeProfileCard(rd)}

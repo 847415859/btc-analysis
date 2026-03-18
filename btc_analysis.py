@@ -45,7 +45,7 @@ TIMEFRAMES = [
     ("4h",  500, "4小时",   300, 300, 4, 0.010, 150),
     ("8h",  500, "8小时",   300, 300, 4, 0.012, 150),
     ("1d",  500, "日线",    300, 300, 5, 0.015, 150),
-    ("1w",  200, "周线",    150, 100, 3, 0.025, 52),
+    # ("1w",  200, "周线",    150, 100, 3, 0.025, 52),
 ]
 
 # SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
@@ -273,7 +273,8 @@ def calculate_indicators(df: pd.DataFrame, tf_interval: str = "") -> pd.DataFram
 def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int = 5,
                              cluster_pct: float = 0.015, ob_levels: list = None,
                              liq_levels: list = None,
-                             vp_data: dict = None, fvg_zones: list = None):
+                             vp_data: dict = None, fvg_zones: list = None,
+                             adx_val=None):
     recent = df.tail(lookback).copy()
     current_price = df["close"].iloc[-1]
 
@@ -292,15 +293,22 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             elif atr_pct_rank <= 25:    # 低波动：扩大窗口，过滤震荡噪音
                 pivot_n = min(8, pivot_n + 2)
 
-    # 1. 识别高低点 (Pivots) - 权重 1.0
+    # P0-3-B: Pivot 在强趋势中降权（强趋势下关键位频繁被穿越，可靠性下降）
+    # ADX 30→1.0, ADX 50→0.67, ADX 60→0.50, ADX 90→0.50（最低0.2）
+    if adx_val is not None and not np.isnan(float(adx_val)):
+        _pivot_weight = max(0.2, 1.0 - max(0, float(adx_val) - 30) / 60)
+    else:
+        _pivot_weight = 1.0
+
+    # 1. 识别高低点 (Pivots)
     raw_levels = []
     for i in range(pivot_n, len(recent) - pivot_n):
         w_h = recent["high"].iloc[i - pivot_n: i + pivot_n + 1]
         w_l = recent["low"].iloc[i - pivot_n: i + pivot_n + 1]
         if recent["high"].iloc[i] == w_h.max():
-            raw_levels.append((recent["high"].iloc[i], 1.0, "pivot"))
+            raw_levels.append((recent["high"].iloc[i], _pivot_weight, "pivot"))
         if recent["low"].iloc[i] == w_l.min():
-            raw_levels.append((recent["low"].iloc[i], 1.0, "pivot"))
+            raw_levels.append((recent["low"].iloc[i], _pivot_weight, "pivot"))
 
     # 2. 识别成交量密集区 (Volume Profile) - 权重 2.0
     price_range = recent["close"].max() - recent["close"].min()
@@ -347,13 +355,19 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             mp = fvg.get("mid", 0)
             bp = fvg["bottom"]; tp = fvg["top"]
             fvg_src = "fvg_bull" if fvg["type"] == "bullish_fvg" else "fvg_bear"
+            # P0-3-A: 填充比例折减权重（填充越多有效性越低）
+            # 0%填充→1.0, 50%填充→0.5, 85%填充→0.15, 最低保留0.1
+            filled_pct  = fvg.get("filled_pct", 0)
+            fvg_validity = max(0.1, 1.0 - filled_pct / 100)
             # 中点是机构挂单核心价格，权重最高
             if mp and 0.85 * current_price <= mp <= 1.15 * current_price:
-                raw_levels.append((mp, 2.5, fvg_src))
+                raw_levels.append((mp, 2.5 * fvg_validity, fvg_src,
+                                   f"FVG中点 已填{filled_pct:.0f}% 有效性{fvg_validity:.0%}"))
             # 缺口边界作为次级 S/R
             for edge in [bp, tp]:
                 if edge and 0.85 * current_price <= edge <= 1.15 * current_price:
-                    raw_levels.append((edge, 1.5, fvg_src))
+                    raw_levels.append((edge, 1.5 * fvg_validity, fvg_src,
+                                       f"FVG边界 已填{filled_pct:.0f}%"))
 
     # 6. 清算密集区（来自 WebSocket 累积或 OI 估算）
     # 多头清算区 → 价格下方潜在支撑（多头止损密集，一旦触及会产生大量卖压，但也是空方目标位）
@@ -368,14 +382,27 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 250, pivot_n: int 
             # 只收录当前价格 ±15% 范围内（清算区距离太远参考意义不大）
             if not (0.85 * current_price <= lc_price <= 1.15 * current_price):
                 continue
+            is_long_liq  = "多头" in dominant
+            is_short_liq = "空头" in dominant
+            # P0-3-C: 方向性有效检查——已被穿越的清算区磁力减至 0.4
+            if is_long_liq:
+                if lc_price > current_price:
+                    liq_validity = 1.0; validity_note = "多头清算区(未触及)→磁吸压力"
+                else:
+                    liq_validity = 0.4; validity_note = "多头清算区(已穿越)→残余阻力"
+            elif is_short_liq:
+                if lc_price < current_price:
+                    liq_validity = 1.0; validity_note = "空头清算区(未触及)→磁吸支撑"
+                else:
+                    liq_validity = 0.4; validity_note = "空头清算区(已穿越)→残余支撑"
+            else:
+                liq_validity = 1.0; validity_note = ""
             # 估算来源权重稍低（1.5），WebSocket 真实数据权重更高（2.5）
             liq_src    = lc.get("source", "estimated")
-            liq_weight = 2.5 if liq_src == "websocket" else 1.5
-            # 来源标签：区分多头/空头清算区
-            if "多头" in dominant:
-                raw_levels.append((lc_price, liq_weight, "liq_long"))
-            elif "空头" in dominant:
-                raw_levels.append((lc_price, liq_weight, "liq_short"))
+            liq_weight = (2.5 if liq_src == "websocket" else 1.5) * liq_validity
+            raw_levels.append((lc_price, liq_weight,
+                               "liq_long" if is_long_liq else "liq_short",
+                               validity_note))
 
     # 5. 聚类合并（支持 3-tuple，合并来源标签）
     def cluster_levels(levels_with_weight, thr=0.015):
@@ -1043,7 +1070,8 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                     fib_levels, symbol: str = "BTC/USDT", tf_label: str = "", verbose: bool = True,
                     liq_clusters: list = None, df_backtest: pd.DataFrame = None,
                     market_structure: dict = None, fvg_zones: list = None,
-                    volume_profile: dict = None, oi_data: dict = None):
+                    volume_profile: dict = None, oi_data: dict = None,
+                    htf_direction: str = "neutral"):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -1063,9 +1091,12 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     emit(f"  {symbol} [{tf_label}] 技术分析报告  |  {ts}")
     emit(f"  当前收盘价: ${price:,.2f}")
     emit(f"{'═'*60}\n")
-    rd["date"]  = ts
-    rd["price"] = price
-    rd["tf"]    = tf_label
+    rd["date"]   = ts
+    rd["price"]  = price
+    rd["tf"]     = tf_label
+    rd["symbol"] = symbol                               # 品种标识（前端显示用）
+    # 基础资产简称：BTCUSDT→BTC, PAXGUSDT→PAXG, ETHUSDT→ETH …
+    rd["asset"]  = symbol.upper().replace("USDT","").replace("PERP","").replace("/","") or symbol
 
     # ── 市场机制识别 ─────────────────────────────────────
     adx_val  = latest["adx"]      if "adx"      in df.columns else np.nan
@@ -1121,13 +1152,10 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         rd["ma"].append({"name": name, "desc": desc, "val": val,
                          "diff_pct": diff_pct, "above": is_above, "signal": "+" if is_above else "-",
                          "active": ma_active})
-    # 动态权重：趋势市MA更可靠，震荡市MA信号噪音大
-    # trending: MA上限±3（强趋势信号更有意义）；ranging: 限压±1（防假突破）
-    _ma_cap = 3 if regime == "trending" else (1 if regime == "ranging" else 2)
-    ma_group_score = max(-_ma_cap, min(_ma_cap, ma_group_raw))
-    score += ma_group_score
-    emit(f"  [趋势组 {regime}] 原始分 {ma_group_raw:+d} → 限幅后 {ma_group_score:+d}/±{_ma_cap}")
-    rd["ma_group_score"] = ma_group_score
+    # P0-1: 趋势市 MACD 将并入此组，cap 升至 ±4；结算延迟到 MACD 归组后
+    # trending: ±4（含MACD）；ranging: ±1（防假突破）；transitional: ±2
+    _ma_cap = 4 if regime == "trending" else (1 if regime == "ranging" else 2)
+    # 得分延迟结算（见 MACD 归组处）
 
     # ── 动量组（RSI + MACD + KDJ）——限幅 ±3 ──────────────────
     momentum_group_raw = 0   # P0-C: 动量组原始分
@@ -1186,12 +1214,37 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         macd_signal = "MACD 在信号线上方 -> 多头"; macd_score = +1
     else:
         macd_signal = "MACD 在信号线下方 -> 空头"; macd_score = -1
-    momentum_group_raw += macd_score   # 累积到动量组
+    # P0-1: 趋势市 MACD 是趋势跟随指标，归入趋势组（与 MA 同性质）
+    _macd_in_trend = False
+    if regime == "trending":
+        ma_group_raw  += macd_score   # 追加到趋势组（MACD+MA合并结算）
+        _macd_in_trend = True
+    else:
+        momentum_group_raw += macd_score   # 震荡/过渡期保持原逻辑
     hist_trend = "柱状图扩大 (动能增强)" if abs(macd_hist) > abs(prev["macd_hist"]) else "柱状图收缩 (动能减弱)"
     emit(f"  MACD: {macd_val:.2f}  信号线: {macd_sig:.2f}  柱: {macd_hist:.2f}")
     emit(f"  信号: {macd_signal}  |  {hist_trend}")
     rd["macd"] = {"val": macd_val, "signal_line": macd_sig, "hist": macd_hist,
                   "signal": macd_signal, "hist_trend": hist_trend, "score": macd_score}
+
+    # P0-2: HTF 门控——逆大势方向的均线/MACD 信号清零，防止与趋势对抗
+    if htf_direction == "bear" and ma_group_raw > 0:
+        emit(f"  [HTF门控] HTF={htf_direction} → 均线/MACD多头信号清零 ({ma_group_raw:+d}→0)")
+        ma_group_raw = 0
+    elif htf_direction == "bull" and ma_group_raw < 0:
+        emit(f"  [HTF门控] HTF={htf_direction} → 均线/MACD空头信号清零 ({ma_group_raw:+d}→0)")
+        ma_group_raw = 0
+
+    # 趋势组结算（MA ± MACD if trending，HTF门控后）
+    _ma_grp_label = f"趋势组 {regime}+MACD" if _macd_in_trend else f"趋势组 {regime}"
+    ma_group_score = max(-_ma_cap, min(_ma_cap, ma_group_raw))
+    score += ma_group_score
+    emit(f"  [{_ma_grp_label}] 原始分 {ma_group_raw:+d} → 限幅后 {ma_group_score:+d}/±{_ma_cap}")
+    rd["ma_group_score"] = ma_group_score
+    rd["htf_gate"] = {
+        "htf_direction": htf_direction,
+        "gated":         htf_direction != "neutral",
+    }
 
     # ── KDJ ──
     k_val, d_val, j_val = latest["kdj_k"], latest["kdj_d"], latest["kdj_j"]
@@ -1385,11 +1438,22 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         "last_cvd":   round(last_cvd,   2),
     }
 
-    # 成交量组限幅 ±2：OBV+CVD 最多贡献 ±2
-    volume_group_score = max(-2, min(2, volume_group_raw))
+    # P0-1: 成交量组机制自适应
+    # 趋势市：量价配合是趋势真实性的核心证据，放大到 ±3
+    # 震荡市/过渡期：成交量参考价值有限（低量震荡也很常见），保持 ±2
+    _vol_cap = 3 if regime == "trending" else 2
+    volume_group_score = max(-_vol_cap, min(_vol_cap, volume_group_raw))
     score += volume_group_score
-    emit(f"\n  [成交量组 OBV+CVD] 原始分 {volume_group_raw:+d} → 限幅后 {volume_group_score:+d}/±2")
+    emit(f"\n  [成交量组 OBV+CVD {regime}] 原始分 {volume_group_raw:+d} → 限幅后 {volume_group_score:+d}/±{_vol_cap}")
     rd["volume_group_score"] = volume_group_score
+    # P0-1: 记录机制自适应参数供前端/调试使用
+    rd["regime_scoring"] = {
+        "regime":              regime,
+        "ma_cap":              _ma_cap,
+        "mom_cap":             _mom_cap,
+        "vol_cap":             _vol_cap,
+        "macd_in_trend_group": _macd_in_trend,
+    }
 
     # ── 支撑/阻力 ──
     emit(f"\n【支撑 / 阻力位】{sep}")
@@ -1888,7 +1952,10 @@ def generate_report(df: pd.DataFrame, supports, resistances,
     emit(f"  共 {len(stop_hunt_zones)} 个猎杀区，高磁力 {sum(1 for z in stop_hunt_zones if z['hunt_probability']=='高')} 个")
 
     # ── 中间汇总（清算区评分后，回测前）─────────────────
-    # 基础分：趋势组±3 + BB±2 + 动量组±4 + 成交量组±2 + 清算区±2 + 市场结构±2 + FVG±1 + 猎杀±1 + K线形态±4 + ADX斜率±1 = 22
+    # 基础分（机制自适应）:
+    #   trending:  趋势组±4(含MACD) + BB±1 + 动量±2 + 量组±3 + 其余±11 ≈ 22
+    #   ranging:   趋势组±1        + BB±2 + 动量±4 + 量组±2 + 其余±11 ≈ 21
+    # 其余 = K线形态±4 + 清算区±2 + 市场结构±2 + FVG±1 + 猎杀±1 + ADX斜率±1 = 11
     max_score = 22   # 回测后 +2，链上 +3，OI后 +2（动态扩展）
     emit(f"\n  [中间得分] {score:+d}/{max_score}（含清算区+市场结构+FVG，待回测修正）")
 
@@ -1971,7 +2038,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                 # 当前 OI 换算为 USDT（用于猎杀区磁力计算）
                 oi_usdt_est = cur_oi * price
 
-                emit(f"  当前OI: {cur_oi:,.0f} BTC (≈${oi_usdt_est/1e9:.1f}B)  48h均值变化: {oi_chg_pct:+.2f}%")
+                emit(f"  当前OI: {cur_oi:,.0f} {rd.get('asset','BTC')} (≈${oi_usdt_est/1e9:.1f}B)  48h均值变化: {oi_chg_pct:+.2f}%")
                 emit(f"  OI趋势: {oi_trend}  价格趋势: {price_trend}  信号: {oi_signal}")
                 emit(f"  OI评分: {oi_score:+d}")
 

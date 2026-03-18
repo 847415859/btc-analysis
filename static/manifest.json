@@ -1,0 +1,19 @@
+{
+  "name": "加密货币技术分析",
+  "short_name": "CryptoTA",
+  "description": "多币种多周期实时技术分析 · Binance 数据源",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1117",
+  "theme_color": "#131722",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
