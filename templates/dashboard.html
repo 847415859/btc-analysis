@@ -119,6 +119,45 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 }
 .sidebar::-webkit-scrollbar { width: 4px; }
 .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+/* ── 精简/完整模式 ─────────────────────────────────── */
+.focus-mode .detail-card { display: none !important; }
+#focusBtn {
+  font-size:11px; padding:3px 12px; border-radius:12px;
+  border:1px solid var(--border); background:var(--bg3);
+  color:var(--text2); cursor:pointer; transition:all .15s; white-space:nowrap;
+}
+#focusBtn.active { background:var(--accent); color:#0e1117; border-color:var(--accent); font-weight:600; }
+/* ── Toast 通知 ─────────────────────────────────────────── */
+#toast-container { position:fixed; bottom:72px; left:50%; transform:translateX(-50%); z-index:9999; display:flex; flex-direction:column-reverse; gap:6px; pointer-events:none; }
+.toast-item { padding:7px 14px; border-radius:8px; font-size:12px; font-weight:500; opacity:0; transform:translateY(8px); transition:opacity .2s,transform .2s; pointer-events:auto; white-space:nowrap; max-width:280px; }
+.toast-item.show { opacity:1; transform:translateY(0); }
+.toast-bull { background:rgba(38,166,154,0.93); border:1px solid #26a69a; color:#fff; }
+.toast-bear { background:rgba(239,83,80,0.93); border:1px solid #ef5350; color:#fff; }
+.toast-warn { background:rgba(249,168,37,0.93); border:1px solid #f9a825; color:#000; }
+/* ── 交易时段时钟 ─────────────────────────────────────── */
+#sessionClock { display:flex; align-items:center; gap:4px; flex-wrap:wrap; justify-content:flex-end; margin-bottom:3px; }
+.sess-tag { font-size:10px; padding:2px 7px; border-radius:3px; font-weight:600; line-height:1.4; }
+.sess-overlap { font-size:10px; color:#ce93d8; font-weight:700; margin-right:2px; }
+/* ── 分析面板警告横幅 ─────────────────────────────────── */
+.alert-banner { margin:4px 8px 0; padding:5px 10px; border-radius:5px; font-size:11px; font-weight:500; line-height:1.4; }
+/* ── 仓位计算器面板 ───────────────────────────────────── */
+#posCalcPanel { position:fixed; bottom:0; left:0; right:0; max-width:440px; margin:0 auto;
+  background:var(--bg2); border-top:1px solid var(--border); border-radius:12px 12px 0 0;
+  padding:16px 16px 24px; z-index:8000; transform:translateY(100%); transition:transform .25s ease;
+  box-shadow:0 -4px 24px rgba(0,0,0,.5); }
+#posCalcPanel.open { transform:translateY(0); }
+#posCalcPanel input { width:100%; background:#0d1117; border:1px solid var(--border);
+  border-radius:5px; color:var(--text); font-size:13px; padding:6px 8px; box-sizing:border-box;
+  outline:none; }
+#posCalcPanel input:focus { border-color:var(--accent); }
+.calc-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:10px; }
+.calc-label { font-size:10px; color:var(--text3); margin-bottom:3px; }
+.calc-result { background:#0d1117; border-radius:6px; padding:10px 12px; margin-top:8px; }
+.calc-result-row { display:flex; justify-content:space-between; align-items:center;
+  font-size:12px; padding:3px 0; border-bottom:1px solid var(--border2); }
+.calc-result-row:last-child { border:0; }
+#calcCloseBtn { position:absolute; top:12px; right:14px; background:none; border:none;
+  color:var(--text3); font-size:18px; cursor:pointer; padding:0; line-height:1; }
 
 .card { border-bottom: 1px solid var(--border2); padding: 12px 14px; }
 .card-title { font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 8px; }
@@ -158,6 +197,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; align-items: center; gap: 8px; background: var(--bg2);
 }
 .chart-toolbar span { font-size: 11px; color: var(--text3); }
+.overlay-btn { font-size:10px; padding:2px 7px; border-radius:4px; border:1px solid var(--border2); background:var(--bg3); color:var(--text3); cursor:pointer; transition:all .12s; white-space:nowrap; }
+.overlay-btn.active { border-color:var(--accent); color:var(--accent); background:rgba(41,182,246,0.08); }
+#quickStats { margin-left:auto; display:flex; align-items:center; gap:10px; font-size:11px; color:var(--text3); flex-shrink:0; }
 #chart-desktop { flex: 1; width: 100%; position: relative; }
 
 /* ══════════════════════════════════════
@@ -286,6 +328,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   color: var(--text2);
 }
+.urgency-badge { padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; margin-left:6px; vertical-align:middle; }
+.urgency-badge.urgent  { background:rgba(239,83,80,0.22); color:#ef5350; animation: pulse 1.4s ease-in-out infinite; }
+.urgency-badge.near    { background:rgba(255,193,7,0.18);  color:#ffc107; }
+.urgency-badge.pending { background:rgba(66,165,245,0.18); color:#42a5f5; }
+.urgency-badge.limit   { background:rgba(102,187,106,0.18);color:#66bb6a; }
 </style>
 </head>
 <body>
@@ -316,7 +363,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
     </div>
     <div class="header-right">
-      <div><span class="update-time" id="lastUpdateTime">等待初次加载...</span></div>
+      <div id="sessionClock"></div>
+<div><span class="update-time" id="lastUpdateTime">等待初次加载...</span></div>
       <div class="countdown-box">
         <div class="countdown-label">下次更新</div>
         <div class="countdown-val" id="countdown">--:--</div>
@@ -329,6 +377,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <div class="desktop-summary-bar">
     <span class="summary-label">多周期信号</span>
     <div id="summaryChips"></div>
+    <div id="quickStats"></div>
   </div>
 
   <!-- 主区域 -->
@@ -347,7 +396,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span>技术图表 —</span>
         <span id="chartTfLabel" style="color:#90caf9;font-weight:600">--</span>
         <span id="chartStatus" style="margin-left:12px;font-size:11px;color:var(--text3)"></span>
-        <span style="margin-left:auto;font-size:10px;color:#37474f">K线 · 均线 · BB · VWAP · ATR止损 · MACD · RSI · KDJ</span>
+        <span id="volSpikeTag" style="display:none;margin-left:6px;font-size:10px;font-weight:700;padding:1px 7px;border-radius:4px"></span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:4px" id="overlayBtns">
+          <button class="overlay-btn" data-key="sr"   onclick="toggleOverlay('sr')"   title="支撑/阻力线">S/R</button>
+          <button class="overlay-btn" data-key="fvg"  onclick="toggleOverlay('fvg')"  title="公允价值缺口">FVG</button>
+          <button class="overlay-btn" data-key="vp"   onclick="toggleOverlay('vp')"   title="成交量分布">VP</button>
+          <button class="overlay-btn" data-key="plan" onclick="toggleOverlay('plan')" title="交易计划线">计划</button>
+          <button class="overlay-btn" data-key="ms"   onclick="toggleOverlay('ms')"   title="市场结构 BOS/CHoCH">MS</button>
+        </div>
       </div>
       <div id="chart-desktop" style="flex:1;position:relative">
         <div id="chartLoading" class="chart-loading-overlay">
@@ -461,6 +517,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </svg>
       <span>信号</span>
     </button>
+    <a class="nav-item" href="/orderbook" style="text-decoration:none;color:inherit">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+        <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+      </svg>
+      <span>盘口</span>
+    </a>
   </nav>
 
 </div><!-- /mobileApp -->
@@ -469,7 +532,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* ══════════════════════════════════════════════════════
    全局配置
 ══════════════════════════════════════════════════════ */
-const SYMBOLS   = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','PAXGUSDT'];
+// 当前启用的分析品种（如需扩展，在 SYMBOLS 和 server.py 的 SYMBOLS 两处同步添加）
+const SYMBOLS   = ['BTCUSDT'];
+// 候选扩展品种：'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'PAXGUSDT'
 const SYMBOL_NAMES = {
   'BTCUSDT':  '₿ BTC/USDT',
   'ETHUSDT':  'Ξ ETH/USDT',
@@ -488,7 +553,18 @@ let isMobile      = window.innerWidth < 768;
 let mobileTab     = 'chart';   // 当前手机 tab
 let fundingCache  = {};        // { symbol: fundingApiResponse }
 let obPressureCache = {};      // { symbol: ob_pressure snapshot }
+let _alertTS = {};             // { key: timestamp } 关键位提醒冷却（5分钟/次）
+let _prevAboveVwap = null;     // VWAP 穿越方向追踪（null=未初始化）
 let onchainData   = {};        // CoinMetrics 真链上数据（30分钟缓存）
+let _fng          = null;      // { value, label, col } 恐慌/贪婪指数缓存
+let _whaleTrades  = [];        // 大单流水缓存
+let _lastAnalysisTs = 0;       // 最近一次分析渲染时间戳
+let _lastKlines = null;        // {candles, supports, resistances, fib, tf} 最近K线缓存供叠加层重绘
+let _chartOverlays = (() => {
+  const def = {"sr":true,"fvg":true,"vp":true,"plan":true,"ms":true};
+  try { return Object.assign(def, JSON.parse(localStorage.getItem('chartOverlays') || '{}')); }
+  catch { return def; }
+})();
 
 /* ══════════════════════════════════════════════════════
    工具函数
@@ -638,7 +714,138 @@ async function fetchPrice() {
     setEls([['mPriceMain',p],['mH24',fmt(d.high24h)],['mL24',fmt(d.low24h)],['mVol24',volTxt]], '--');
     const mpc = document.getElementById('mPriceChange');
     if (mpc) { mpc.textContent = chgTxt; mpc.className = 'app-price-chg ' + (chg >= 0 ? 'up' : 'down'); }
+    checkPriceAlerts(d.price);
   } catch(e) { console.warn('price fetch failed', e); }
+}
+
+/* ══════════════════════════════════════════════════════
+   关键位接近提醒
+══════════════════════════════════════════════════════ */
+function showToast(msg, type = 'warn') {
+  const c = document.getElementById('toast-container');
+  if (!c) return;
+  const el = document.createElement('div');
+  el.className = `toast-item toast-${type}`;
+  el.textContent = msg;
+  c.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 250);
+  }, 4000);
+}
+
+function checkPriceAlerts(price) {
+  if (!price || !analysisData._ready) return;
+  const data = analysisData[currentTf];
+  if (!data) return;
+  const now = Date.now();
+  const COOLDOWN = 5 * 60 * 1000; // 5分钟冷却
+
+  // 检查支撑/阻力位
+  const levels = [
+    ...(data.supports || []).map(s => ({ ...s, side: 'sup' })),
+    ...(data.resistances || []).map(r => ({ ...r, side: 'res' })),
+  ];
+  for (const lv of levels) {
+    if (!lv.price) continue;
+    const dist = Math.abs(price - lv.price) / price * 100;
+    if (dist > 0.5) continue;
+    const key = `sr_${Math.round(lv.price / 100) * 100}_${lv.side}`;
+    if (now - (_alertTS[key] || 0) < COOLDOWN) continue;
+    _alertTS[key] = now;
+    const dir = lv.side === 'sup' ? '支撑' : '阻力';
+    const type = lv.side === 'sup' ? 'bull' : 'bear';
+    showToast(`⚠ 接近${dir}位 $${Math.round(lv.price).toLocaleString()} (±${dist.toFixed(2)}%)`, type);
+  }
+
+  // 检查清算密集区
+  const rd = data.rd;
+  const clusters = rd?.liq?.clusters || [];
+  for (const lc of clusters) {
+    if (!lc.price) continue;
+    const dist = Math.abs(price - lc.price) / price * 100;
+    if (dist > 1.0) continue;
+    const key = `liq_${Math.round(lc.price / 200) * 200}`;
+    if (now - (_alertTS[key] || 0) < COOLDOWN) continue;
+    _alertTS[key] = now;
+    const isBull = (lc.dominant || '').includes('多头');
+    showToast(`💥 接近清算密集区 $${Math.round(lc.price).toLocaleString()} (${dist.toFixed(2)}%)`, isBull ? 'bear' : 'bull');
+  }
+
+  // 检查入场触发价 & 失效线
+  const tp = rd?.trade_plan;
+  if (tp?.entry_price && ['long', 'short'].includes(tp.direction)) {
+    const entryDist = Math.abs(price - tp.entry_price) / price * 100;
+    if (entryDist <= 0.15) {
+      const eKey = `entry_${Math.round(tp.entry_price / 10) * 10}`;
+      if (now - (_alertTS[eKey] || 0) >= COOLDOWN) {
+        _alertTS[eKey] = now;
+        const dir = tp.direction === 'long' ? '做多' : '做空';
+        showToast(`🎯 入场区间！${dir}触发 $${Math.round(tp.entry_price).toLocaleString()} (距${entryDist.toFixed(2)}%)`, tp.direction === 'long' ? 'bull' : 'bear');
+      }
+    }
+    const inv = tp.invalidation;
+    if (inv?.price) {
+      const broken = tp.direction === 'long' ? price <= inv.price : price >= inv.price;
+      if (broken) {
+        const iKey = `inv_${Math.round(inv.price / 10) * 10}`;
+        if (now - (_alertTS[iKey] || 0) >= COOLDOWN * 2) {
+          _alertTS[iKey] = now;
+          showToast(`⚡ 信号失效！$${Math.round(inv.price).toLocaleString()} 已破，做${tp.direction === 'long' ? '多' : '空'}结构瓦解`, 'bear');
+        }
+      }
+    }
+
+    // TP1 触达 → 建议移止损至成本
+    const tp1 = tp?.tp_levels?.[0];
+    if (tp1?.price && tp.entry_price) {
+      const tp1Hit = tp.direction === 'long' ? price >= tp1.price : price <= tp1.price;
+      if (tp1Hit) {
+        const t1Key = `tp1_${Math.round(tp1.price / 10) * 10}`;
+        if (now - (_alertTS[t1Key] || 0) >= COOLDOWN * 6) {
+          _alertTS[t1Key] = now;
+          showToast(`🎯 TP1 触达 $${Math.round(tp1.price).toLocaleString()} · 建议移止损至成本 $${Math.round(tp.entry_price).toLocaleString()}`, 'bull');
+        }
+      }
+    }
+  }
+
+  // VWAP 穿越警报
+  const vwap = rd?.vwap?.val;
+  if (vwap && price) {
+    const aboveNow = price > vwap;
+    if (_prevAboveVwap !== null && _prevAboveVwap !== aboveNow) {
+      const vKey = `vwap_cross_${aboveNow ? 'up' : 'dn'}`;
+      if (now - (_alertTS[vKey] || 0) >= COOLDOWN) {
+        _alertTS[vKey] = now;
+        showToast(aboveNow
+          ? `🌊 价格重夺 VWAP $${Math.round(vwap).toLocaleString()} · 多头占优`
+          : `🌊 价格跌破 VWAP $${Math.round(vwap).toLocaleString()} · 空头占优`,
+          aboveNow ? 'bull' : 'bear');
+      }
+    }
+    _prevAboveVwap = aboveNow;
+  }
+
+  // 资金费率急变警报
+  const fundD = fundingCache[currentSymbol];
+  if (fundD?.historical?.length >= 20) {
+    const rates  = fundD.historical.map(h => h.rate || 0);
+    const prev10 = rates.slice(-20, -10).reduce((a, b) => a + b, 0) / 10;
+    const last10 = rates.slice(-10).reduce((a, b) => a + b, 0) / 10;
+    const frSpike = last10 - prev10;
+    if (Math.abs(frSpike) >= 0.03) {
+      const frKey = `fr_spike_${frSpike > 0 ? 'up' : 'dn'}`;
+      if (now - (_alertTS[frKey] || 0) >= COOLDOWN * 4) {
+        _alertTS[frKey] = now;
+        showToast(frSpike > 0
+          ? `⚡ 资金费率急升 +${frSpike.toFixed(3)}% · 多头过热，注意回调`
+          : `⚡ 资金费率急降 ${frSpike.toFixed(3)}% · 空头压力加剧`,
+          frSpike > 0 ? 'bear' : 'bull');
+      }
+    }
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -687,6 +894,35 @@ async function fetchFunding() {
     }
 
   } catch(e) { console.warn('funding fetch failed', e); }
+}
+
+/* ══════════════════════════════════════════════════════
+   交易时段时钟
+══════════════════════════════════════════════════════ */
+function updateSessionClock() {
+  const el = document.getElementById('sessionClock');
+  if (!el) return;
+  const now  = new Date();
+  const frac = now.getUTCHours() + now.getUTCMinutes() / 60;
+  // 各时段 UTC 区间
+  const SESSIONS = [
+    { name:'亚盘', start:0,  end:9,  color:'#f9a825', vol:'低波动' },
+    { name:'伦敦', start:7,  end:16, color:'#29b6f6', vol:'中高波动' },
+    { name:'美盘', start:13, end:22, color:'#66bb6a', vol:'最高波动' },
+  ];
+  const active = SESSIONS.filter(s => frac >= s.start && frac < s.end);
+  if (active.length === 0) {
+    el.innerHTML = `<span class="sess-tag" style="background:#1a1f2e;color:#546e7a">深夜盘</span>`;
+    return;
+  }
+  const overlap = active.length > 1;
+  let html = overlap ? `<span class="sess-overlap">⚡交叉</span>` : '';
+  html += active.map(s => {
+    const remMin = Math.round((s.end - frac) * 60);
+    const rH = Math.floor(remMin / 60), rM = remMin % 60;
+    return `<span class="sess-tag" style="background:${s.color}20;color:${s.color}">${s.name} <span style="opacity:.65">${rH}h${String(rM).padStart(2,'0')}m</span></span>`;
+  }).join('');
+  el.innerHTML = html;
 }
 
 /* ══════════════════════════════════════════════════════
@@ -802,7 +1038,7 @@ async function showFootprint() {
   try {
     const r = await fetch(`/api/footprint/${currentTf}?symbol=${currentSymbol}`);
     const d = await r.json();
-    if (d.error) { body.innerHTML = `<div style="color:#ef5350;padding:16px">${d.error}</div>`; return; }
+    if (d.error) { const _errDiv = document.createElement('div'); _errDiv.style.cssText = 'color:#ef5350;padding:16px'; _errDiv.textContent = d.error; body.innerHTML = ''; body.appendChild(_errDiv); return; }
 
     const buckets = d.buckets || [];
     const maxVol  = Math.max(...buckets.map(b => b.buy + b.sell), 1);
@@ -864,7 +1100,7 @@ async function fetchAnalysisAndUpdate() {
     updateMobileAnalysis(currentTf);
     updateMobileSignals();
     await fetchKlinesAndRender(currentTf);
-  } catch(e) { console.warn('analysis fetch failed', e); }
+  } catch(e) { console.warn('analysis fetch failed', e); showToast('⚠ 分析数据获取失败，显示缓存数据', 'bear'); }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -884,6 +1120,28 @@ function updateSummaryChips() {
     chip.onclick = () => switchTf(tf);
     container.appendChild(chip);
   });
+  // 快速指标栏（桌面顶部条末尾）
+  const qs = document.getElementById('quickStats');
+  const qd = analysisData[currentTf];
+  if (qs && qd) {
+    const rd = qd.rd;
+    const rsiV = rd.rsi?.val != null ? Math.round(rd.rsi.val) : '--';
+    const rsiC = rd.rsi?.score > 0 ? '#26a69a' : rd.rsi?.score < 0 ? '#ef5350' : '#78909c';
+    const vw = rd.vwap;
+    const vwTxt = vw ? `VWAP ${vw.above ? '↑' : '↓'}${Math.abs(vw.diff_pct||0).toFixed(2)}%` : '';
+    const vwC = vw?.above ? '#26a69a' : '#ef5350';
+    const atr = rd.atr?.val != null ? Math.round(rd.atr.val) : '--';
+    const fr = fundingCache[currentSymbol]?.funding_rate;
+    const frTxt = fr != null ? (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%' : '';
+    const frC = fr > 0.05 ? '#ef5350' : fr < -0.05 ? '#26a69a' : '#90a4ae';
+    const sep = `<span style="color:var(--border2)">│</span>`;
+    qs.innerHTML = [
+      `RSI <b style="color:${rsiC}">${rsiV}</b>`,
+      vwTxt ? `${sep}<span style="color:${vwC}">${vwTxt}</span>` : '',
+      `${sep}ATR <b style="color:#90caf9">$${atr}</b>`,
+      frTxt ? `${sep}FR <b style="color:${frC}">${frTxt}</b>` : '',
+    ].join('');
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -891,6 +1149,7 @@ function updateSummaryChips() {
 ══════════════════════════════════════════════════════ */
 async function switchTf(tf) {
   currentTf = tf;
+  localStorage.setItem('tf', tf);
   // 更新桌面 chips
   document.querySelectorAll('.tf-chip').forEach(c => c.classList.toggle('active', c.dataset.tf === tf));
   // 更新手机 tf-chips
@@ -912,7 +1171,10 @@ function updateSidebar(tf) {
   const data = analysisData[tf]; if (!data) return;
   const { rd, supports, resistances, fib } = data;
   const sidebar = document.getElementById('sidebar');
-  sidebar.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol]);
+  sidebar.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol], obPressureCache[currentSymbol]);
+  _applyFocusMode(sidebar);
+  _lastAnalysisTs = Date.now();
+  updateAnalysisAge();
 }
 
 /* ══════════════════════════════════════════════════════
@@ -923,7 +1185,133 @@ function updateMobileAnalysis(tf) {
   const { rd, supports, resistances, fib } = data;
   const panel = document.getElementById('panel-analysis');
   if (!panel) return;
-  panel.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol]);
+  panel.innerHTML = buildAnalysisHTML(tf, rd, supports, resistances, fib, fundingCache[currentSymbol], obPressureCache[currentSymbol]);
+  _applyFocusMode(panel);
+  _lastAnalysisTs = Date.now();
+  updateAnalysisAge();
+}
+
+/* ══════════════════════════════════════════════════════
+   仓位计算器
+══════════════════════════════════════════════════════ */
+function openPosCalc(entryPrice, slPrice) {
+  const panel = document.getElementById('posCalcPanel');
+  if (!panel) return;
+  // 预填账户余额和风险比例（从 localStorage 恢复）
+  const balEl  = document.getElementById('calBalance');
+  const riskEl = document.getElementById('calRisk');
+  if (balEl  && !balEl.value)  balEl.value  = localStorage.getItem('calBal')  || '10000';
+  if (riskEl && !riskEl.value) riskEl.value = localStorage.getItem('calRisk') || '1';
+  // 预填入场/止损价
+  if (entryPrice) document.getElementById('calEntry').value = Number(entryPrice).toFixed(2);
+  if (slPrice)    document.getElementById('calSL').value    = Number(slPrice).toFixed(2);
+  panel.classList.add('open');
+  calcPosition();
+}
+function closePosCalc() {
+  document.getElementById('posCalcPanel')?.classList.remove('open');
+}
+function calcPosition() {
+  const bal   = parseFloat(document.getElementById('calBalance')?.value) || 0;
+  const risk  = parseFloat(document.getElementById('calRisk')?.value)    || 1;
+  const entry = parseFloat(document.getElementById('calEntry')?.value)   || 0;
+  const sl    = parseFloat(document.getElementById('calSL')?.value)      || 0;
+  // 持久化设置
+  if (bal  > 0) localStorage.setItem('calBal',  bal);
+  if (risk > 0) localStorage.setItem('calRisk', risk);
+  const res = document.getElementById('calcResult');
+  if (!res) return;
+  if (!bal || !entry || !sl || entry === sl) {
+    res.innerHTML = '<div style="font-size:11px;color:var(--text3);text-align:center">请填写账户余额和入场/止损价格</div>';
+    return;
+  }
+  const riskAmt   = bal * risk / 100;                       // 风险金额
+  const slDistPct = Math.abs(entry - sl) / entry * 100;     // 止损幅度%
+  const posSize   = riskAmt / (slDistPct / 100);            // 仓位价值(USDT)
+  const qty       = posSize / entry;                        // 数量(BTC)
+  const leverage  = posSize / bal;                          // 隐含杠杆
+  const isLong    = entry > sl;
+  const rr1       = analysisData[currentTf]?.rd?.trade_plan?.rr_tp1;
+  const profitEst = rr1 ? riskAmt * rr1 : null;
+  const leverageStr = leverage < 1.5 ? '1×' : leverage < 2.5 ? '2×' : leverage < 3.5 ? '3×'
+    : leverage < 6 ? '5×' : leverage < 8 ? '7×' : '10×+';
+  const lvCol = leverage <= 3 ? '#26a69a' : leverage <= 7 ? '#f9a825' : '#ef5350';
+
+  res.innerHTML = `
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">方向</span>
+      <span style="color:${isLong?'#26a69a':'#ef5350'};font-weight:700">${isLong?'做多 ↑':'做空 ↓'}</span>
+    </div>
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">风险金额</span>
+      <span style="color:#f9a825;font-weight:700">$${riskAmt.toFixed(2)} (${risk}%)</span>
+    </div>
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">止损幅度</span>
+      <span>${slDistPct.toFixed(2)}%</span>
+    </div>
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">建议仓位</span>
+      <span style="font-size:14px;font-weight:800;color:var(--accent)">$${posSize.toLocaleString('en-US',{maximumFractionDigits:0})}</span>
+    </div>
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">数量 (BTC)</span>
+      <span style="font-weight:600">${qty.toFixed(4)} BTC</span>
+    </div>
+    <div class="calc-result-row">
+      <span style="color:var(--text3)">隐含杠杆</span>
+      <span style="color:${lvCol};font-weight:700">${leverageStr} (${leverage.toFixed(1)}×)</span>
+    </div>
+    ${profitEst ? `<div class="calc-result-row">
+      <span style="color:var(--text3)">预估盈利 (TP1)</span>
+      <span style="color:#26a69a;font-weight:700">+$${profitEst.toFixed(2)}</span>
+    </div>` : ''}
+  `;
+}
+// 点击面板外关闭
+document.addEventListener('click', e => {
+  const panel = document.getElementById('posCalcPanel');
+  if (panel?.classList.contains('open') && !panel.contains(e.target) && !e.target.closest('[onclick*="openPosCalc"]') && !e.target.closest('[onclick*="PosCalc"]')) {
+    closePosCalc();
+  }
+});
+
+/* ── 一键复制价格 ─────────────────────────────────────── */
+function copyPrice(price, label) {
+  const txt = String(Number(price).toFixed(2));
+  navigator.clipboard?.writeText(txt).then(() => {
+    showToast(`✓ ${label} ${txt} 已复制`, 'warn');
+  }).catch(() => {
+    // fallback for http
+    const el = document.createElement('textarea');
+    el.value = txt; el.style.position = 'fixed'; el.style.opacity = '0';
+    document.body.appendChild(el); el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    showToast(`✓ ${label} ${txt} 已复制`, 'warn');
+  });
+}
+
+/* 精简/完整模式切换 */
+function toggleFocusMode() {
+  const containers = [document.getElementById('sidebar'), document.getElementById('panel-analysis')];
+  const anyActive = containers.some(c => c && c.classList.contains('focus-mode'));
+  const nowFocus = !anyActive;
+  containers.forEach(c => {
+    if (!c) return;
+    c.classList.toggle('focus-mode', nowFocus);
+    const btn = c.querySelector('#focusBtn');
+    if (btn) { btn.textContent = nowFocus ? '完整' : '精简'; btn.classList.toggle('active', nowFocus); }
+  });
+  localStorage.setItem('fm', nowFocus ? '1' : '0');
+}
+
+function _applyFocusMode(container) {
+  if (localStorage.getItem('fm') === '1') {
+    container.classList.add('focus-mode');
+    const btn = container.querySelector('#focusBtn');
+    if (btn) { btn.textContent = '完整'; btn.classList.add('active'); }
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -1004,6 +1392,8 @@ function buildSignalDimensionCard(rd) {
     { label: '市场结构 (MS+FVG+猎杀)',s: (() => { const ms = rd.market_structure?.score ?? 0; const fvg = rd.fvg_score ?? 0; const hunt = rd.hunt_score_adj ?? 0; return ms + fvg + hunt; })(), max: 4, note: '' },
     { label: '链上验证',             s: rd.onchain?.score,       max: 3, note: '' },
     { label: '持仓量 OI',           s: rd.oi?.score,            max: 2, note: '' },
+    { label: '多空比 L/S Ratio',    s: rd.ls_ratio?.score,      max: 3, note: '' },
+    { label: '宏观关联 (DXY/NAS)', s: rd.macro?.eligible ? rd.macro?.score : null, max: 2, note: rd.macro?.eligible === false ? '短周期不计' : '' },
     { label: '历史回测',             s: rd.backtest?.score,      max: 2, note: '' },
   ];
 
@@ -1072,7 +1462,22 @@ function buildRegimeBadge(rd) {
         <span style="color:var(--text3);font-size:10px">${adxStr}</span>
         ${slopeVal != null ? `<span style="font-size:10px;color:${slopeColor};font-weight:600">${slopeStr}${slopeIcon}</span>` : ''}
       </div>
-      <div style="font-size:10px;color:var(--text3);margin-bottom:2px">${volStr}</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:4px">${volStr}</div>
+      ${reg.adx != null ? (() => {
+        const adx = reg.adx;
+        // ADX: 0-25 弱, 25-50 中, 50-75 强, 75+ 极强
+        const pct  = Math.min(adx / 75 * 100, 100).toFixed(1);
+        const adxCol = adx >= 50 ? '#26a69a' : adx >= 25 ? '#f9a825' : '#78909c';
+        const adxLbl = adx >= 50 ? '强趋势' : adx >= 25 ? '趋势形成' : '无趋势/盘整';
+        return `<div style="margin-bottom:4px">
+          <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text3);margin-bottom:2px">
+            <span>ADX趋势强度</span><span style="color:${adxCol};font-weight:600">${adxLbl}</span>
+          </div>
+          <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:${adxCol};border-radius:2px;transition:width .4s"></div>
+          </div>
+        </div>`;
+      })() : ''}
       <div style="font-size:10px;color:${color};opacity:0.9">${tip}</div>
     </div>`;
 }
@@ -1663,6 +2068,38 @@ function buildOBPressureCard(obp) {
 
 
 /* ══════════════════════════════════════════════════════
+   迷你盘口压力卡（精简模式专用）
+══════════════════════════════════════════════════════ */
+function buildMiniObCard(obp) {
+  if (!obp || obp.ratio == null) return '';
+  const ratio = obp.ratio;
+  const bid   = obp.bid_pressure || 0;
+  const ask   = obp.ask_pressure || 0;
+  const score = obp.score || 0;
+  const total = bid + ask;
+  const bidPct = total > 0 ? (bid / total * 100).toFixed(1) : 50;
+  const askPct = total > 0 ? (ask / total * 100).toFixed(1) : 50;
+  const col = score >= 1 ? 'var(--bull)' : score <= -1 ? 'var(--bear)' : 'var(--neutral)';
+  const labelMap = { '2':'极强买压','1':'买压偏强','0':'买卖平衡','-1':'卖压偏强','-2':'极强卖压' };
+  const label = (labelMap[String(score)] || '平衡') + (score >= 0 ? ` +${score}` : ` ${score}`);
+  return `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+      <span class="card-title" style="margin:0;padding:0;border:0">盘口压力</span>
+      <span style="font-size:11px;font-weight:600;color:${col}">${label}</span>
+    </div>
+    <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;margin-bottom:4px">
+      <div style="width:${bidPct}%;background:var(--bull);opacity:0.8;transition:width .4s"></div>
+      <div style="flex:1;background:var(--bear);opacity:0.8"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3)">
+      <span style="color:var(--bull)">买 ${bidPct}%</span>
+      <span style="color:${col};font-weight:600">${ratio.toFixed(3)}</span>
+      <span style="color:var(--bear)">卖 ${askPct}%</span>
+    </div>
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
    资金费率详情卡片（含迷你折线图 + 百分位）
 ══════════════════════════════════════════════════════ */
 function buildFundingCard(funding, rd = null) {
@@ -1830,8 +2267,8 @@ function buildFundingCard(funding, rd = null) {
 
     // 数据来源标注
     const srcLabel = liqSource === 'websocket'
-      ? `<span style="color:#26a69a;font-size:9px">● 实时WS (${liqStats.hours_covered||0}h/${liqStats.total||0}条)</span>`
-      : `<span style="color:#f9a825;font-size:9px">◐ S/R估算</span>`;
+      ? `<span style="color:#26a69a;font-size:9px;cursor:default" title="来自 Binance liquidation WebSocket 实时推送">🟢 实时WS · ${liqStats.hours_covered||0}h/${liqStats.total||0}条</span>`
+      : `<span style="color:#f9a825;font-size:9px;cursor:default" title="WebSocket 未连接，当前由 S/R 结构估算，精度有限">🟡 OI估算 · 精度有限</span>`;
 
     // 评分行
     let scoreRow = '';
@@ -2362,6 +2799,169 @@ function buildFVGCard(rd) {
   </div>`;
 }
 
+/* ══════════════════════════════════════════════════════
+   交易决策摘要横幅 — 最顶层的一句话判断
+══════════════════════════════════════════════════════ */
+function buildDecisionBanner(rd) {
+  const tp = rd?.trade_plan;
+  if (!tp) return '';
+  const fmt = p => p == null ? '--' : '$' + Math.round(p).toLocaleString('en-US');
+  const TF_VALIDITY = {
+    '15m':'约30-60分钟','30m':'约1-2小时','1h':'约2-4小时',
+    '2h':'约4-8小时','4h':'约8-16小时','8h':'约1-2天',
+    '1d':'约2-4天','1w':'约1-2周'
+  };
+  const validity = TF_VALIDITY[currentTf] || '';
+  const isWait = tp.direction === 'wait';
+  const isLong = tp.direction === 'long';
+  const isSpec = tp.is_speculative === true;
+
+  // ── compositeScore 快速近似（复用 rd 已有字段，无需重算）──
+  const _frScoreApprox = (() => {
+    const fc = fundingCache[currentSymbol];
+    if (!fc?.analysis) return 0;
+    return fc.analysis.score || 0;
+  })();
+  const _oiApprox = (() => {
+    const fc = fundingCache[currentSymbol];
+    if (!fc?.oi?.history?.length) return 0;
+    const sig = getOIBreakoutSignal(fc, rd);
+    return sig?.score || 0;
+  })();
+  const compositeApprox = rd.score + _frScoreApprox + _oiApprox;
+
+  // compositeScore → 决断一句话
+  const _verdicts = [
+    [8,  true,  '强烈看多 🚀', '可积极做多，止损严守，目标看前高'],
+    [4,  true,  '偏多 📈',     '逢低限价建仓，支撑附近分批入场'],
+    [1,  true,  '温和偏多',    '轻仓试探，等突破确认再加仓'],
+    [-1, true,  '中性震荡 ↔️', '暂无方向优势，等待关键位突破'],
+    [-4, false, '温和偏空',    '谨慎追多，反弹视做空机会'],
+    [-8, false, '偏空 📉',     '逢高限价做空，阻力附近分批建仓'],
+    [-99,false, '强烈看空 🔻', '可积极做空，止损严守，目标看前低'],
+  ];
+  let verdictLabel = '', verdictSuggest = '';
+  for (const [thresh, bull, label, sug] of _verdicts) {
+    if (compositeApprox >= thresh) { verdictLabel = label; verdictSuggest = sug; break; }
+  }
+  if (!verdictLabel) { verdictLabel = '强烈看空 🔻'; verdictSuggest = '可积极做空，止损严守，目标看前低'; }
+
+  // ── Top-3 信号催化剂（从 rd 快速提取）─────────────────
+  const catalysts = [];
+  const ms = rd?.market_structure;
+  if (ms?.structure_cn && ms.structure !== 'unknown')
+    catalysts.push(ms.structure_cn.replace(/[()（）↑↓]/g,'').trim());
+  const divSigs = rd?.divergence?.signals || [];
+  if (divSigs.length) catalysts.push(divSigs[0].replace(/^[⚠️✅🔻📈\s]+/,'').split('：')[0].substring(0,12));
+  const patterns = rd?.candle_patterns?.patterns || [];
+  if (patterns.length) catalysts.push(patterns[0].name);
+  if (rd?.vwap) catalysts.push(rd.vwap.above ? 'VWAP 多方占优' : 'VWAP 空方占优');
+  const mtfNote = rd?.mtf_bias?.note || '';
+  if (mtfNote) catalysts.push(mtfNote.replace(/^[✅⚠️🔻📈\s]+/,'').split('，')[0].substring(0,14));
+  if (rd?.regime?.note) catalysts.push(rd.regime.note.split('，')[0].substring(0,12));
+  const top3 = catalysts.filter(Boolean).slice(0, 3);
+
+  // ── 颜色主题 ──────────────────────────────────────────
+  const theme = isWait ? { bg:'rgba(120,144,156,0.10)', border:'#546e7a', accent:'#90a4ae', icon:'⏸' }
+    : isSpec ? { bg: isLong ? 'rgba(249,168,37,0.10)' : 'rgba(255,112,67,0.10)',
+                  border: isLong ? '#f9a825' : '#ff7043', accent: isLong ? '#f9a825' : '#ff7043', icon:'🎲' }
+    : isLong  ? { bg:'rgba(38,166,154,0.15)', border:'#26a69a', accent:'#26a69a', icon:'📈' }
+              : { bg:'rgba(239,83,80,0.15)',   border:'#ef5350', accent:'#ef5350', icon:'📉' };
+
+  // ── Grade 徽章 ────────────────────────────────────────
+  const grade = window._currentGrade || ['–','#78909c',''];
+  const gradeText = isSpec ? 'C' : grade[0];
+  const gradeCol  = isSpec ? '#f9a825' : grade[1];
+
+  // ── 紧迫度徽章（Fix B）────────────────────────────────
+  const entryDist   = Math.abs(tp?.entry_dist_pct || 0);
+  const entryMethod = tp?.entry_method || '';
+  let urgencyHtml = '';
+  if (!isWait) {
+    if (entryMethod === '市价追入') {
+      urgencyHtml = `<span class="urgency-badge urgent">🔴 立即入场</span>`;
+    } else if (entryDist < 0.5) {
+      urgencyHtml = `<span class="urgency-badge near">⚡ 已近入场区</span>`;
+    } else if (entryMethod.includes('预挂')) {
+      urgencyHtml = `<span class="urgency-badge pending">📌 可预挂单</span>`;
+    } else if (entryMethod.includes('限价')) {
+      urgencyHtml = `<span class="urgency-badge limit">🎯 限价等触发</span>`;
+    }
+  }
+
+  // ── 第一行：方向 + 决断语 ─────────────────────────────
+  let mainLine, subLine;
+  if (isWait) {
+    mainLine = `<span style="font-size:15px;font-weight:800;color:${theme.accent}">⏸ 等待机会</span>`;
+    subLine  = `<span style="font-size:11px;color:#78909c">${tp.condition_long || tp.reason || ''}</span>`;
+  } else if (isSpec) {
+    mainLine = `<span style="font-size:15px;font-weight:800;color:${theme.accent}">${theme.icon} ${isLong ? '投机做多' : '投机做空'}</span>
+      <span style="font-size:12px;color:${gradeCol};background:${gradeCol}22;padding:1px 6px;border-radius:4px;border:1px solid ${gradeCol}44">Grade ${gradeText}</span>
+      <span style="font-size:11px;color:${theme.accent}">· ${verdictLabel}</span>
+      ${urgencyHtml}`;
+    subLine  = `<span style="font-size:10px;color:var(--text3)">轻仓 ≤ 0.5% 风险 · ${validity}</span>`;
+  } else {
+    mainLine = `<span style="font-size:16px;font-weight:900;color:${theme.accent}">${theme.icon} ${isLong ? '做多' : '做空'}</span>
+      <span style="font-size:13px;font-weight:800;color:${gradeCol};background:${gradeCol}22;padding:1px 7px;border-radius:4px;border:1px solid ${gradeCol}44">Grade ${gradeText}</span>
+      <span style="font-size:12px;color:${theme.accent};font-weight:700">· ${verdictLabel}</span>
+      ${urgencyHtml}`;
+    subLine  = `<span style="font-size:11px;color:var(--text3)">${verdictSuggest}</span>`;
+  }
+
+  // ── 催化剂标签行 ────────────────────────────────────────
+  const catalystRow = top3.length ? `
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
+      <span style="font-size:10px;color:var(--text3)">📌</span>
+      ${top3.map(c => `<span style="font-size:10px;color:${theme.accent};background:${theme.accent}15;
+        padding:1px 6px;border-radius:10px;border:1px solid ${theme.accent}30">${c}</span>`).join('')}
+      <span style="margin-left:auto;font-size:10px;color:var(--text3)">信号有效 ${validity}</span>
+    </div>` : '';
+
+  // ── 关键价位行 ─────────────────────────────────────────
+  const priceRow = (!isWait && tp.entry_price) ? (() => {
+    const tp1 = tp.tp_levels?.[0];
+    const rrCol = tp.rr_tp1 >= 2.0 ? '#26a69a' : tp.rr_tp1 >= 1.5 ? '#f9a825' : '#ef9a9a';
+    const tp2 = tp.tp_levels?.[1];
+    return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+      margin-top:8px;padding-top:8px;border-top:1px solid ${theme.border}44;font-size:11px">
+      <span style="cursor:pointer;color:#90caf9;font-weight:600" onclick="copyPrice(${tp.entry_price},'入场价')" title="点击复制">
+        入场 <strong style="font-size:13px">${fmt(tp.entry_price)}</strong>
+      </span>
+      <span style="color:var(--text3)">›</span>
+      ${tp1 ? `<span style="cursor:pointer;color:#80cbc4" onclick="copyPrice(${tp1.price},'TP1')" title="点击复制">
+        TP1 <strong>${fmt(tp1.price)}</strong>
+        <span style="color:var(--text3);font-size:10px">(+${tp1.dist_pct?.toFixed(1)||'?'}%)</span>
+      </span>` : ''}
+      ${tp2 ? `<span style="cursor:pointer;color:#4db6ac;font-size:10px" onclick="copyPrice(${tp2.price},'TP2')" title="点击复制">
+        TP2 ${fmt(tp2.price)}
+      </span>` : ''}
+      <span style="color:var(--text3)">|</span>
+      <span style="cursor:pointer;color:#ef9a9a" onclick="copyPrice(${tp.sl_price},'止损')" title="点击复制">
+        止损 <strong>${fmt(tp.sl_price)}</strong>
+        <span style="color:var(--text3);font-size:10px">(-${tp.sl_dist_pct?.toFixed(1)||'?'}%)</span>
+      </span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <span style="font-size:13px;font-weight:800;color:${rrCol}">R:R ${tp.rr_tp1?.toFixed(1)||'--'}x</span>
+        ${rd.confidence_pct ? `<span style="font-size:11px;color:var(--text3)">置信 ${rd.confidence_pct}%</span>` : ''}
+      </span>
+    </div>`;
+  })() : (isWait ? `<div style="margin-top:7px;padding:7px 10px;background:rgba(0,0,0,0.2);border-radius:5px">
+    <div style="font-size:10px;color:var(--text3);margin-bottom:4px;font-weight:600">触发条件</div>
+    <div style="font-size:11px;color:#66bb6a;margin-bottom:2px">🟢 ${tp.condition_long || '--'}</div>
+    <div style="font-size:11px;color:#ef5350">🔴 ${tp.condition_short || '--'}</div>
+  </div>` : '');
+
+  return `<div style="margin:0 0 8px;padding:11px 14px;border-radius:8px;
+    background:${theme.bg};border-left:4px solid ${theme.border}">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      ${mainLine}
+    </div>
+    <div style="margin-top:3px">${subLine}</div>
+    ${catalystRow}
+    ${priceRow}
+  </div>`;
+}
+
 /* 共用 HTML 构建函数 */
 /* ══════════════════════════════════════════════════════
    入场方案卡片
@@ -2374,13 +2974,37 @@ function buildTradePlanCard(rd) {
   const fmtP  = p => p == null ? '--' : '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
   const fmtP2 = p => p == null ? '--' : '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
+  // Setup Grade（A/B/C/D）综合评级 — 在 wait 判断之前计算
+  const _grade = window._currentGrade = (() => {
+    const mtf  = window._mtfConf;
+    const ms   = Math.abs(rd.market_structure?.structure_score || 0);
+    const conf = rd.confidence_pct || 0;
+    const techPct = rd.max_score > 0 ? Math.abs(rd.score) / rd.max_score : 0;
+    const mtfAbs  = mtf ? Math.abs(mtf.score) : 0;
+    const pts =
+      (mtfAbs >= 60 ? 3 : mtfAbs >= 40 ? 2 : mtfAbs >= 20 ? 1 : 0) +
+      (techPct >= 0.5 ? 3 : techPct >= 0.35 ? 2 : techPct >= 0.2 ? 1 : 0) +
+      (conf  >= 70 ? 3 : conf  >= 55 ? 2 : conf  >= 40 ? 1 : 0) +
+      (ms >= 2 ? 2 : ms >= 1 ? 1 : 0);
+    if (pts >= 9) return ['A', '#26a69a', '强势信号'];
+    if (pts >= 6) return ['B', '#66bb6a', '良好信号'];
+    if (pts >= 3) return ['C', '#f9a825', '一般信号'];
+    return                ['D', '#ef5350', '信号偏弱'];
+  })();
+  const _gradeBadge = `<span style="font-size:15px;font-weight:800;color:${_grade[1]};background:${_grade[1]}22;
+    width:24px;height:24px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;
+    border:1px solid ${_grade[1]}55;margin-right:2px" title="${_grade[2]}">${_grade[0]}</span>`;
+
   // ── 观望状态 ──────────────────────────────────────────────
   if (tp.direction === 'wait') {
     return `
     <div class="card" style="border-left:3px solid ${col}">
       <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
         <span>📋 入场方案</span>
-        <span style="color:${col};font-weight:700">${tp.direction_cn}</span>
+        <div style="display:flex;align-items:center;gap:5px">
+          ${_gradeBadge}
+          <span style="color:${col};font-weight:700">${tp.direction_cn}</span>
+        </div>
       </div>
       <div style="font-size:12px;color:#f9a825;padding:4px 0;line-height:1.5">${tp.reason || ''}</div>
       <div style="margin-top:8px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:4px">
@@ -2410,7 +3034,7 @@ function buildTradePlanCard(rd) {
     return `
     <div style="display:flex;align-items:center;gap:4px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
       <span style="color:var(--text3);font-size:10px;font-weight:700;min-width:24px">${t.tp_label}</span>
-      <span style="font-size:13px;font-weight:700">${fmtP(t.price)}${srcBadge}</span>
+      <span style="font-size:13px;font-weight:700;cursor:pointer" onclick="copyPrice(${t.price},'${t.tp_label}')" title="点击复制">${fmtP(t.price)}${srcBadge} <span style="font-size:9px;opacity:.4">⎘</span></span>
       <span style="font-size:11px;color:${isLong ? 'var(--bull)' : 'var(--bear)'}">${distSign}${t.dist_pct != null ? t.dist_pct.toFixed(2) : '--'}%</span>
       <span style="margin-left:auto;background:rgba(255,255,255,0.06);color:${c};padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700">R:R ${t.rr != null ? t.rr.toFixed(1) : '--'}x</span>
     </div>`;
@@ -2422,43 +3046,88 @@ function buildTradePlanCard(rd) {
     ? `<span style="color:var(--text3);font-size:10px">（当前价 ${isLong ? '-' : '+'}${Math.abs(edPct).toFixed(2)}%）</span>`
     : '';
 
-  // 不推荐警告
-  const noRecHtml = !tp.recommended ? `
-    <div style="background:rgba(239,83,80,0.1);border:1px solid rgba(239,83,80,0.25);border-radius:5px;
-                padding:5px 10px;font-size:11px;color:#ef5350;margin-bottom:8px">
-      ❌ R:R 不足（${rr1}x），当前位置风险回报比较低，建议等待更优入场点
+  // 合并所有警告为单行 badges（替代原来4个大框）
+  const _warnBadges = [];
+  if (!tp.recommended)   _warnBadges.push(`<span style="color:#ef5350;background:rgba(239,83,80,0.12);padding:1px 6px;border-radius:3px">❌ R:R ${rr1}x 偏低</span>`);
+  if (tp.htf_conflict)   _warnBadges.push(`<span style="color:#ce93d8;background:rgba(156,39,176,0.12);padding:1px 6px;border-radius:3px">⚠ 逆势操作</span>`);
+  if (tp.is_speculative) _warnBadges.push(`<span style="color:#f9a825;background:rgba(249,168,37,0.12);padding:1px 6px;border-radius:3px">🎲 投机·轻仓≤0.5%</span>`);
+  if (tp.near_hunt_warn) _warnBadges.push(`<span style="color:#ffc107;background:rgba(255,193,7,0.10);padding:1px 6px;border-radius:3px">⚡ 临近猎杀区</span>`);
+  const _gate = rd?.htf_gate;
+  if (_gate?.gated) {
+    const _gd = _gate.htf_direction === 'bull' ? '多' : '空';
+    _warnBadges.push(`<span style="color:#90a4ae;background:rgba(120,144,156,0.10);padding:1px 6px;border-radius:3px">📐 HTF偏${_gd}</span>`);
+  }
+  const noRecHtml = _warnBadges.length ? `
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;font-size:10px">
+      ${_warnBadges.join('')}
     </div>` : '';
+  const htfConflictHtml = '';
+  const htfGateHtml = '';
+  const specHtml = '';
 
-  // HTF方向冲突警告
-  const htfConflictHtml = tp.htf_conflict ? `
-    <div style="background:rgba(156,39,176,0.1);border:1px solid rgba(156,39,176,0.3);border-radius:5px;
-                padding:6px 10px;font-size:11px;color:#ce93d8;margin-bottom:8px">
-      ${tp.htf_conflict_note || '⚠️ HTF方向冲突：当前信号与大周期趋势相反，逆势操作'}
-    </div>` : '';
+  // 执行步骤
+  const actionStepsHtml = (() => {
+    if (tp.direction === 'wait') return '';
+    const TF_VALIDITY = {
+      '15m':'约30-60分钟','30m':'约1-2小时','1h':'约2-4小时',
+      '2h':'约4-8小时','4h':'约8-16小时','8h':'约1-2天','1d':'约2-4天','1w':'约1-2周'
+    };
+    const validity = TF_VALIDITY[currentTf] || '';
+    const tp1 = tp.tp_levels?.[0], tp2 = tp.tp_levels?.[1];
+    const iv  = tp.invalidation;
+    const entrySuffix = tp.entry_dist_pct != null && Math.abs(tp.entry_dist_pct) > 0.05
+      ? `（距现价 ${tp.entry_dist_pct > 0 ? '+' : ''}${tp.entry_dist_pct.toFixed(2)}%）` : '';
+    const methodMap = { market:'市价入场', limit:'限价挂单', pullback:'等待回调后入场', wait:'条件触发' };
+    const steps = [
+      `${methodMap[tp.entry_method] || '挂单'} ${fmtP(tp.entry_price)} ${entrySuffix}`,
+      `设置止损 ${fmtP(tp.sl_price)}${tp.sl_label ? ' — ' + tp.sl_label : ''}（幅度 ${tp.sl_dist_pct?.toFixed(2) || '--'}%）`,
+      tp1 ? `TP1 ${fmtP(tp1.price)} 触达 → 减仓 ${tp1.partial || '50%'}，剩余止损移至成本 ${fmtP(tp.entry_price)}` : null,
+      tp2 ? `TP2 ${fmtP(tp2.price)} 触达 → 清仓剩余仓位` : null,
+      iv?.price ? `失效条件：${isLong ? '收盘跌破' : '收盘突破'} ${fmtP(iv.price)} → 立即取消所有挂单` : null,
+    ].filter(Boolean);
+    const colors = ['#90caf9','#ef9a9a','#80cbc4','#80cbc4','#ffcc80'];
+    const nums = ['①','②','③','④','⑤'];
+    return `<div style="margin-top:10px;padding:10px 12px;background:rgba(0,0,0,0.18);border-radius:6px;border-top:1px solid var(--border2)">
+      <div style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">
+        📋 执行步骤 <span style="font-weight:400;color:#546e7a">· 信号有效${validity}</span>
+      </div>
+      ${steps.map((s,i) => `<div style="display:flex;gap:8px;margin-bottom:6px;font-size:11px;line-height:1.5">
+        <span style="color:${colors[i]||'var(--text3)'};font-weight:700;min-width:18px;flex-shrink:0">${nums[i]}</span>
+        <span style="color:var(--text2)">${s}</span>
+      </div>`).join('')}
+    </div>`;
+  })();
 
-  // 止损猎杀警告
-  const huntHtml = tp.near_hunt_warn ? `
-    <div style="background:rgba(255,193,7,0.1);border-left:3px solid #ffc107;border-radius:0 4px 4px 0;
-                padding:6px 8px;font-size:11px;color:#ffc107;margin-top:6px">
-      ⚠️ 临近止损猎杀区：机构可能在此区域清扫止损，入场后需更严格止损管理
-    </div>` : '';
+  // 止损猎杀警告已合并进 noRecHtml badges
+  const huntHtml = '';
 
   // 止损类型颜色
   const slTypeBadge = {
     'structural': '<span style="font-size:9px;background:rgba(38,166,154,0.2);color:#4db6ac;padding:1px 4px;border-radius:3px;margin-left:4px">结构型</span>',
     'liq':        '<span style="font-size:9px;background:rgba(239,83,80,0.2);color:#ef9a9a;padding:1px 4px;border-radius:3px;margin-left:4px">清算优化</span>',
+    'ob_wall':    '<span style="font-size:9px;background:rgba(41,182,246,0.2);color:#81d4fa;padding:1px 4px;border-radius:3px;margin-left:4px">OB挂单墙</span>',
     'atr':        '<span style="font-size:9px;background:rgba(255,152,0,0.2);color:#ffb74d;padding:1px 4px;border-radius:3px;margin-left:4px">ATR</span>',
   }[tp.sl_type] || '';
 
   return `
   <div class="card" style="border-left:3px solid ${col}">
     <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
-      <span>📋 入场方案</span>
-      <span style="color:${col};font-weight:700;font-size:13px">${tp.direction_cn}</span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span>📋 入场方案</span>
+        <button onclick="copySignalSummary()" title="复制信号摘要"
+          style="font-size:10px;padding:2px 6px;border-radius:8px;border:1px solid var(--border);
+                 background:var(--bg3);color:var(--text3);cursor:pointer;line-height:1.4">⎘ 复制</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px">
+        ${_gradeBadge}
+        <span style="color:${col};font-weight:700;font-size:13px">${tp.direction_cn}</span>
+      </div>
     </div>
 
     ${noRecHtml}
     ${htfConflictHtml}
+    ${specHtml}
+    ${htfGateHtml}
 
     <!-- R:R 摘要行 -->
     <div style="display:flex;align-items:center;gap:8px;padding:7px 0 9px;border-bottom:1px solid var(--border2)">
@@ -2490,9 +3159,13 @@ function buildTradePlanCard(rd) {
       <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">入场</div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
         <span style="color:#90caf9;font-size:11px;font-weight:600">${tp.entry_method || '--'}</span>
-        <span style="font-size:15px;font-weight:700">${fmtP(tp.entry_price)} ${edLabel}</span>
+        <span style="font-size:15px;font-weight:700;cursor:pointer" onclick="copyPrice(${tp.entry_price},'入场')" title="点击复制">${fmtP(tp.entry_price)} ${edLabel} <span style="font-size:10px;opacity:.45">⎘</span></span>
       </div>
-      <div style="font-size:10px;color:var(--text3);line-height:1.4">${tp.entry_note || ''}</div>
+      ${tp.entry_note ? `<div style="margin-top:4px;padding:5px 10px;
+        background:${isLong?'rgba(38,166,154,0.11)':'rgba(239,83,80,0.11)'};
+        border-left:3px solid ${isLong?'#26a69a':'#ef5350'};
+        border-radius:4px;font-size:12px;color:${isLong?'#80cbc4':'#ef9a9a'};font-weight:500;line-height:1.4">
+        ${tp.entry_note}</div>` : ''}
     </div>
 
     <!-- 止损 -->
@@ -2500,11 +3173,20 @@ function buildTradePlanCard(rd) {
       <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">止损</div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
         <span style="color:var(--bear);font-size:11px">${tp.sl_label || 'ATR止损'}${slTypeBadge}</span>
-        <span style="font-size:15px;font-weight:700;color:var(--bear)">${fmtP2(tp.sl_price)}</span>
+        <span style="font-size:15px;font-weight:700;color:var(--bear);cursor:pointer" onclick="copyPrice(${tp.sl_price},'止损')" title="点击复制">${fmtP2(tp.sl_price)} <span style="font-size:10px;opacity:.45">⎘</span></span>
       </div>
       <div style="font-size:10px;color:var(--bear)">
         ${isLong ? '↓' : '↑'} ${tp.sl_dist_pct != null ? tp.sl_dist_pct.toFixed(2) : '--'}% 止损幅度
       </div>
+    </div>
+
+    <!-- 仓位计算器快捷入口 -->
+    <div style="padding:6px 0;border-bottom:1px solid var(--border2);text-align:right">
+      <button onclick="openPosCalc(${tp.entry_price || 0}, ${tp.sl_price || 0})"
+        style="font-size:11px;padding:4px 12px;border-radius:10px;border:1px solid var(--border);
+               background:var(--bg3);color:var(--accent);cursor:pointer;display:inline-flex;align-items:center;gap:5px">
+        🧮 <span>计算仓位</span>
+      </button>
     </div>
 
     <!-- 止盈目标 -->
@@ -2520,6 +3202,29 @@ function buildTradePlanCard(rd) {
     </div>` : ''}
 
     ${huntHtml}
+
+    <!-- 信号失效条件 -->
+    ${(() => {
+      const iv = tp.invalidation;
+      if (!iv || !iv.price) return '';
+      const ivClr = isLong ? '#ef9a9a' : '#4db6ac';
+      return `<div style="margin-top:8px;padding:8px;background:rgba(0,0,0,0.25);border-radius:6px;border-left:2px solid ${ivClr}">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">⚡ 信号失效条件（论据崩溃线）</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:11px;color:${ivClr}">${iv.note || ''}</span>
+          <span style="font-size:14px;font-weight:700;color:${ivClr}">${fmtP2(iv.price)}</span>
+        </div>
+        <div style="font-size:10px;color:var(--text3);line-height:1.5">
+          ${iv.condition || ''}
+          <span style="margin-left:6px;color:${ivClr}">(${isLong ? '↓' : '↑'} ${iv.dist_pct != null ? iv.dist_pct.toFixed(2) : '--'}%)</span>
+        </div>
+        <div style="margin-top:4px;font-size:9px;color:var(--text3);font-style:italic">
+          ℹ️ 失效线 ≠ 止损线。止损是风控触发点；失效线是做${isLong ? '多' : '空'}结构彻底破坏的价位。
+        </div>
+      </div>`;
+    })()}
+
+    ${actionStepsHtml}
   </div>`;
 }
 
@@ -2545,6 +3250,248 @@ function buildOICard(rd) {
     </div>
     <div style="margin-top:7px;padding:5px 8px;background:#0e1117;border-radius:4px;font-size:12px;color:${scoreClr}">
       ${oi.signal ?? ''}
+    </div>
+  </div>`;
+}
+
+function buildLSRatioCard(rd) {
+  const ls = rd?.ls_ratio;
+  if (!ls) return '';
+  const score    = ls.score ?? 0;
+  const scoreClr  = score > 0 ? '#26a69a' : score < 0 ? '#ef5350' : 'var(--text3)';
+  const borderClr = score > 0 ? '#26a69a' : score < 0 ? '#ef5350' : '#2a2e39';
+
+  // 多空比例可视化行
+  function ratioRow(label, info, chgPct) {
+    if (!info || !info.ratio) return '';
+    const r     = info.ratio;
+    const lPct  = info.long_pct  ?? (r / (1 + r) * 100);
+    const sPct  = info.short_pct ?? (100 - lPct);
+    const rClr  = r > 1.1 ? '#26a69a' : r < 0.9 ? '#ef5350' : '#d1d4dc';
+    const chgHtml = chgPct != null
+      ? `<span style="font-size:10px;color:${chgPct >= 0 ? '#26a69a' : '#ef5350'}">${chgPct >= 0 ? '▲' : '▼'}${Math.abs(chgPct).toFixed(1)}%</span>`
+      : '';
+    return `<div style="margin-bottom:7px">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text3);margin-bottom:3px">
+        <span>${label}</span>
+        <span style="display:flex;align-items:center;gap:5px">
+          多<span style="color:#26a69a;font-weight:600">${lPct.toFixed(1)}%</span>
+          空<span style="color:#ef5350;font-weight:600">${sPct.toFixed(1)}%</span>
+          比率<span style="color:${rClr};font-weight:700">${r.toFixed(3)}</span>
+          ${chgHtml}
+        </span>
+      </div>
+      <div style="height:5px;border-radius:3px;overflow:hidden;background:rgba(239,83,80,0.25)">
+        <div style="height:100%;width:${lPct.toFixed(1)}%;background:#26a69a;border-radius:3px 0 0 3px;transition:width .3s"></div>
+      </div>
+    </div>`;
+  }
+
+  const signalsHtml = (ls.signals || []).length > 0
+    ? ls.signals.map(s => {
+        const c = s.startsWith('⚠️') ? '#ff9800' : s.startsWith('✅') ? '#80cbc4' : s.startsWith('📌') ? '#ba68c8' : 'var(--text2)';
+        return `<div style="font-size:11px;padding:2px 0;color:${c};line-height:1.5">${s}</div>`;
+      }).join('')
+    : `<div style="font-size:11px;color:var(--text3)">无显著信号</div>`;
+
+  const priceDir = ls.price_dir === 'up' ? '↑' : ls.price_dir === 'down' ? '↓' : '→';
+  const priceDirClr = ls.price_dir === 'up' ? '#26a69a' : ls.price_dir === 'down' ? '#ef5350' : 'var(--text3)';
+
+  return `<div class="card" style="border-left:3px solid ${borderClr}">
+    <div class="card-title">⚖️ 多空比 (Long/Short Ratio)
+      <span style="margin-left:8px;font-size:15px;font-weight:700;color:${scoreClr}">${score >= 0 ? '+' : ''}${score}</span>
+      <span style="margin-left:auto;font-size:10px;color:${priceDirClr}">价格 ${priceDir} ${ls.price_chg_pct != null ? (ls.price_chg_pct >= 0 ? '+' : '') + ls.price_chg_pct.toFixed(2) + '%' : ''}</span>
+    </div>
+    ${ratioRow('🏢 大户持仓比', ls.top_position, ls.top_position?.chg_pct)}
+    ${ratioRow('👔 大户账户比', ls.top_account, null)}
+    ${ratioRow('👥 散户全账户', ls.global, null)}
+    <div style="margin-top:6px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:4px">
+      ${signalsHtml}
+    </div>
+  </div>`;
+}
+
+function buildMacroCard(rd) {
+  const mac = rd?.macro;
+  if (!mac) return '';
+  const score     = mac.score ?? 0;
+  const scoreClr  = score > 0 ? '#26a69a' : score < 0 ? '#ef5350' : 'var(--text3)';
+  const borderClr = score > 0 ? '#26a69a' : score < 0 ? '#ef5350' : '#2a2e39';
+
+  const mkRow = (label, data) => {
+    if (!data) return '';
+    const dir = data.direction;
+    const clr = dir === 'up' ? '#26a69a' : dir === 'down' ? '#ef5350' : 'var(--text3)';
+    const arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '→';
+    const chg   = data.chg_pct != null ? (data.chg_pct >= 0 ? '+' : '') + data.chg_pct.toFixed(3) + '%' : '--';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">
+      <span style="color:var(--text2)">${label}</span>
+      <span style="color:${clr};font-weight:600">${arrow} ${data.price?.toLocaleString() ?? '--'}
+        <span style="font-size:10px;font-weight:400;margin-left:4px">${chg}</span>
+      </span>
+    </div>`;
+  };
+
+  const signalsHtml = mac.signals && mac.signals.length
+    ? mac.signals.map(s => `<div style="font-size:11px;color:var(--text2);padding:2px 0">${s}</div>`).join('')
+    : `<div style="font-size:11px;color:var(--text3)">宏观指标横盘，无方向性信号</div>`;
+
+  const eligibleNote = mac.eligible === false
+    ? `<div style="font-size:10px;color:var(--text3);padding:4px 0">当前周期不纳入宏观评分（仅 2小时+ 周期有效）</div>`
+    : '';
+
+  const _fngHtml = (() => {
+    if (!_fng) return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2)">
+      <span style="font-size:10px;color:var(--text3);min-width:60px">恐慌/贪婪</span>
+      <span style="font-size:12px;color:var(--text3)">-- <span style="font-size:9px">数据暂不可用</span></span>
+    </div>`;
+    const { value: fv, label: fl, col: fc } = _fng;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2)">
+      <span style="font-size:10px;color:var(--text3);min-width:60px">恐慌/贪婪</span>
+      <div style="flex:1;height:5px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden">
+        <div style="width:${fv}%;height:100%;background:linear-gradient(90deg,#26a69a,#f9a825 50%,#ef5350);border-radius:3px"></div>
+      </div>
+      <span style="font-size:13px;font-weight:700;color:${fc}">${fv}</span>
+      <span style="font-size:10px;color:var(--text3)">${fl}</span>
+    </div>`;
+  })();
+
+  return `<div class="card" style="border-left:3px solid ${borderClr}">
+    <div class="card-title">🌍 宏观关联层 (DXY & NASDAQ)
+      <span style="margin-left:8px;font-size:15px;font-weight:700;color:${scoreClr}">${score >= 0 ? '+' : ''}${score}</span>
+    </div>
+    ${_fngHtml}
+    ${eligibleNote}
+    ${mkRow('🇺🇸 DXY（美元指数）', mac.dxy)}
+    ${mkRow('📈 NASDAQ（^IXIC）', mac.nasdaq)}
+    <div style="margin-top:6px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:4px">
+      ${signalsHtml}
+    </div>
+    <div style="margin-top:5px;font-size:9px;color:var(--text3);font-style:italic">
+      BTC与DXY负相关（美元强→BTC弱）；与NASDAQ正相关（风险偏好↑→BTC强）。仅2H+周期参与评分。
+    </div>
+  </div>`;
+}
+
+function buildMonteCarloCard(rd) {
+  const tp = rd?.trade_plan;
+  const mc = tp?.monte_carlo;
+  if (!mc || mc.error || !tp || !['long','short'].includes(tp.direction)) return '';
+
+  const isLong   = tp.direction === 'long';
+  const tpLevels = tp.tp_levels || [];
+  const fmtP     = p => p != null ? '$' + p.toLocaleString('en-US', {maximumFractionDigits: 0}) : '--';
+  const fmtPct   = p => p != null ? (p >= 0 ? '+' : '') + p.toFixed(2) + '%' : '--';
+
+  // 概率水平条
+  const probBar = (pct, color) => {
+    const w = Math.max(2, Math.min(100, pct));
+    return `<div style="height:6px;border-radius:3px;background:rgba(255,255,255,0.06);margin-top:3px">
+      <div style="height:6px;border-radius:3px;background:${color};width:${w}%;transition:width .3s"></div>
+    </div>`;
+  };
+
+  // TP 行
+  const probColors = ['#26a69a', '#66bb6a', '#a5d6a7'];
+  const probs      = [mc.prob_tp1, mc.prob_tp2, mc.prob_tp3];
+  const tpRows = tpLevels.map((t, i) => {
+    const prob = probs[i] ?? 0;
+    const clr  = probColors[i] || '#26a69a';
+    return `<div style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px">
+        <span style="color:var(--text2)">${t.tp_label} <span style="color:${clr};font-weight:600">${fmtP(t.price)}</span></span>
+        <span style="color:${clr};font-weight:700;font-size:13px">${prob}%</span>
+      </div>
+      ${probBar(prob, clr)}
+    </div>`;
+  }).join('');
+
+  // SL 行
+  const slRow = `<div style="margin-bottom:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px">
+      <span style="color:var(--text2)">触及 SL <span style="color:#ef5350;font-weight:600">${fmtP(tp.sl_price)}</span></span>
+      <span style="color:#ef5350;font-weight:700;font-size:13px">${mc.prob_sl}%</span>
+    </div>
+    ${probBar(mc.prob_sl, '#ef5350')}
+  </div>`;
+
+  // 未触及行
+  const noneRow = mc.prob_none > 0 ? `<div style="margin-bottom:4px">
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3)">
+      <span>在 ${mc.horizon_bars} 根K线内未触及任何目标</span>
+      <span>${mc.prob_none}%</span>
+    </div>
+  </div>` : '';
+
+  // 终价分位数可视化
+  const pMin = Math.min(mc.p5, tp.sl_price || mc.p5);
+  const pMax = Math.max(mc.p95, (tpLevels[tpLevels.length-1]?.price || mc.p95));
+  const pRange = pMax - pMin || 1;
+  const toX = p => Math.max(0, Math.min(100, (p - pMin) / pRange * 100));
+  const quantileBar = `<div style="position:relative;height:14px;background:rgba(255,255,255,0.04);border-radius:4px;margin:10px 0 6px">
+    <!-- IQR 区间 P25-P75 -->
+    <div style="position:absolute;top:0;bottom:0;left:${toX(mc.p25).toFixed(1)}%;width:${Math.max(0,toX(mc.p75)-toX(mc.p25)).toFixed(1)}%;background:rgba(255,152,0,0.2);border-radius:3px"></div>
+    <!-- 中位线 -->
+    <div style="position:absolute;top:0;bottom:0;left:${toX(mc.p50).toFixed(1)}%;width:2px;background:#f9a825;border-radius:1px"></div>
+    <!-- P5/P95 点 -->
+    <div style="position:absolute;top:3px;bottom:3px;left:${toX(mc.p5).toFixed(1)}%;width:3px;background:#ef5350;border-radius:1px" title="P5"></div>
+    <div style="position:absolute;top:3px;bottom:3px;left:${toX(mc.p95).toFixed(1)}%;width:3px;background:#26a69a;border-radius:1px" title="P95"></div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text3)">
+    <span>P5 ${fmtP(mc.p5)}</span>
+    <span>P25 ${fmtP(mc.p25)}</span>
+    <span style="color:#f9a825">中位 ${fmtP(mc.p50)}</span>
+    <span>P75 ${fmtP(mc.p75)}</span>
+    <span>P95 ${fmtP(mc.p95)}</span>
+  </div>`;
+
+  // 黑天鹅 & EV
+  const bsPrice = isLong ? mc.p5 : mc.p95;
+  const bsMov   = tp.entry_price ? ((bsPrice - tp.entry_price) / tp.entry_price * 100).toFixed(1) : '--';
+  const bsLabel = isLong ? `5% 概率跌至 ${fmtP(bsPrice)}（${bsMov}%）`
+                         : `5% 概率涨至 ${fmtP(bsPrice)}（+${Math.abs(bsMov)}%）`;
+  const evClr   = mc.ev_pct >= 0 ? '#26a69a' : '#ef5350';
+  const evNote  = mc.ev_pct >= 0.1 ? '正期望值 ✅' : mc.ev_pct <= -0.1 ? '负期望值 ⚠️ 审慎' : '期望值接近零 ↔️';
+
+  // 分布特征
+  const skewDesc  = mc.skewness < -0.3 ? '左偏（崩跌概率偏高）'
+                  : mc.skewness >  0.3 ? '右偏（拉升概率偏高）' : '近似对称';
+  const kurtDesc  = mc.kurt_excess > 1.0 ? '胖尾（极端事件偏多）'
+                  : mc.kurt_excess < -0.5 ? '薄尾（极端事件偏少）' : '正常';
+
+  return `<div class="card" style="border-left:3px solid #7e57c2">
+    <div class="card-title">🎲 蒙特卡洛概率分析
+      <span style="margin-left:8px;font-size:10px;color:var(--text3)">N=${mc.n_sims} | ${mc.horizon_bars} 根K线前向模拟</span>
+    </div>
+
+    <!-- 分布特征 -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;color:var(--text3);margin-bottom:10px;padding:5px 8px;background:rgba(0,0,0,0.2);border-radius:4px">
+      <span>波动率 <span style="color:#d1d4dc">${mc.vol_pct}%/bar</span></span>
+      <span>偏度 <span style="color:#d1d4dc">${mc.skewness > 0 ? '+' : ''}${mc.skewness} (${skewDesc})</span></span>
+      <span>超额峰度 <span style="color:#d1d4dc">${mc.kurt_excess > 0 ? '+' : ''}${mc.kurt_excess} (${kurtDesc})</span></span>
+    </div>
+
+    <!-- 概率分布 -->
+    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">首次触及概率</div>
+    ${tpRows}
+    ${slRow}
+    ${noneRow}
+
+    <!-- 终价分位数 -->
+    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-top:10px;margin-bottom:2px">${mc.horizon_bars} 根K线后终价分布</div>
+    ${quantileBar}
+
+    <!-- 黑天鹅 + EV -->
+    <div style="margin-top:10px;padding:7px 8px;background:rgba(0,0,0,0.25);border-radius:5px;font-size:11px">
+      <div style="color:#ef9a9a;margin-bottom:4px">⚡ 黑天鹅: ${bsLabel}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:var(--text3)">期望值 (EV)</span>
+        <span style="color:${evClr};font-weight:700">${fmtPct(mc.ev_pct)} &nbsp;<span style="font-weight:400;font-size:10px">${evNote}</span></span>
+      </div>
+    </div>
+
+    <div style="margin-top:5px;font-size:9px;color:var(--text3);font-style:italic">
+      Bootstrap历史模拟法 · 采样自近200根K线收益率分布 · 非正态假设，自然继承偏度与胖尾
     </div>
   </div>`;
 }
@@ -2600,6 +3547,147 @@ function computeMTFConfluence() {
     if (score >= 0 ? rd.score > 0 : rd.score < 0) aligned++;
   });
   return { score, total, aligned, pct: total > 0 ? Math.round(aligned / total * 100) : 0 };
+}
+
+/* ══════════════════════════════════════════════════════
+   多风格信号台 — 四位交易员人格卡片
+══════════════════════════════════════════════════════ */
+function buildPersonaSignalsCard(rd) {
+  const plans = rd?.persona_plans;
+  if (!plans) return '';
+
+  const personas = ['laowang', 'lijie', 'chenboshi', 'laotu'];
+  const fmt = p => p == null ? '--' : '$' + Math.round(p).toLocaleString('en-US');
+  const stars = n => `<span style="color:#f9a825;font-size:11px">${'★'.repeat(n||0)}${'☆'.repeat(5-(n||0))}</span>`;
+
+  // ── 共识仪表盘 ────────────────────────────────────────────
+  let longCnt = 0, shortCnt = 0, waitCnt = 0;
+  const entryPrices = [];
+  personas.forEach(id => {
+    const p = plans[id];
+    if (!p) return;
+    if (p.direction === 'long')  { longCnt++;  if (p.entry_price) entryPrices.push(p.entry_price); }
+    else if (p.direction === 'short') { shortCnt++; if (p.entry_price) entryPrices.push(p.entry_price); }
+    else waitCnt++;
+  });
+  const totalActive = longCnt + shortCnt;
+  let consensusLabel = '', consensusColor = '#90a4ae';
+  if (longCnt  >= 3) { consensusLabel = '多方共识 🟢'; consensusColor = '#26a69a'; }
+  else if (shortCnt >= 3) { consensusLabel = '空方共识 🔴'; consensusColor = '#ef5350'; }
+  else if (longCnt > shortCnt && longCnt >= 2) { consensusLabel = '偏多 📈'; consensusColor = '#66bb6a'; }
+  else if (shortCnt > longCnt && shortCnt >= 2) { consensusLabel = '偏空 📉'; consensusColor = '#ef9a9a'; }
+  else { consensusLabel = '⚠️ 方向分歧'; consensusColor = '#f9a825'; }
+
+  const minEp = entryPrices.length ? Math.min(...entryPrices) : null;
+  const maxEp = entryPrices.length ? Math.max(...entryPrices) : null;
+  const rangeHtml = (minEp && maxEp && minEp !== maxEp)
+    ? `入场区间 <b style="color:#90caf9">${fmt(minEp)} ~ ${fmt(maxEp)}</b>  ·`
+    : (minEp ? `入场参考 <b style="color:#90caf9">${fmt(minEp)}</b>  ·` : '');
+
+  const consensusBar = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+      padding:8px 12px;background:rgba(0,0,0,0.25);border-radius:6px;margin-bottom:10px;font-size:12px">
+      <span style="font-weight:700;color:${consensusColor};font-size:13px">${consensusLabel}</span>
+      <span style="color:var(--text3)">|</span>
+      <span style="color:#66bb6a">🟢 ${longCnt}</span>
+      <span style="color:#ef5350">🔴 ${shortCnt}</span>
+      <span style="color:#90a4ae">⚪ ${waitCnt}</span>
+      <span style="color:var(--text3)">|</span>
+      <span style="color:var(--text3)">${rangeHtml} ${totalActive} 位有入场建议</span>
+    </div>`;
+
+  // ── 单张人格卡片 ─────────────────────────────────────────
+  function buildCard(id) {
+    const p = plans[id];
+    if (!p) return '';
+    const isWait = p.direction === 'wait';
+    const isLong = p.direction === 'long';
+    const borderCol = isWait ? '#546e7a' : p.color;
+    const tp1 = p.tp_levels?.[0];
+    const tp2 = p.tp_levels?.[1];
+
+    // 价格行（仅非观望时）
+    const priceHtml = !isWait ? `
+      <div style="margin:6px 0;display:flex;flex-direction:column;gap:2px;font-size:11px">
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:var(--text3)">入场</span>
+          <span onclick="copyPrice(${p.entry_price},'入场')" style="cursor:pointer;color:#90caf9;font-weight:600" title="点击复制">
+            ${fmt(p.entry_price)}
+            <span style="color:var(--text3);font-size:9px">(${p.entry_method||''})</span>
+          </span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:var(--text3)">止损</span>
+          <span onclick="copyPrice(${p.sl_price},'止损')" style="cursor:pointer;color:#ef9a9a;font-weight:600" title="点击复制">
+            ${fmt(p.sl_price)}
+            <span style="color:var(--text3);font-size:9px">(-${p.sl_dist_pct?.toFixed(1)||'?'}%)</span>
+          </span>
+        </div>
+        ${tp1 ? `<div style="display:flex;justify-content:space-between">
+          <span style="color:var(--text3)">TP1</span>
+          <span onclick="copyPrice(${tp1.price},'TP1')" style="cursor:pointer;color:#80cbc4;font-weight:600" title="点击复制">
+            ${fmt(tp1.price)}
+            <span style="color:var(--text3);font-size:9px">(+${tp1.dist_pct?.toFixed(1)||'?'}%  R:R ${tp1.rr?.toFixed(1)||'?'}x)</span>
+          </span>
+        </div>` : ''}
+        ${tp2 ? `<div style="display:flex;justify-content:space-between">
+          <span style="color:var(--text3)">TP2</span>
+          <span onclick="copyPrice(${tp2.price},'TP2')" style="cursor:pointer;color:#4db6ac;font-size:10px" title="点击复制">
+            ${fmt(tp2.price)} <span style="color:var(--text3);font-size:9px">(+${tp2.dist_pct?.toFixed(1)||'?'}%)</span>
+          </span>
+        </div>` : ''}
+      </div>` : '';
+
+    const dirBadgeBg = isWait ? 'rgba(84,110,122,0.2)' : `${p.color}22`;
+    const dirIcon = isWait ? '⚪' : (isLong ? '📈' : '📉');
+
+    return `
+    <div style="background:rgba(18,22,34,0.75);border-radius:8px;border-left:3px solid ${borderCol};padding:10px 12px;">
+      <!-- 头部：人格标识 + 星级 -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+        <div>
+          <span style="font-size:13px">${p.persona_icon}</span>
+          <span style="font-size:13px;font-weight:700;color:var(--text1);margin-left:3px">${p.persona_name}</span>
+          <span style="font-size:10px;color:var(--text3);margin-left:3px">${p.persona_style}</span>
+        </div>
+        <div>${stars(p.confidence_stars)}</div>
+      </div>
+      <!-- 方向 + 参数行 -->
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+        <span style="padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;
+          background:${dirBadgeBg};color:${isWait ? '#90a4ae' : p.color}">${dirIcon} ${p.direction_cn}</span>
+        ${!isWait ? `
+          <span style="font-size:10px;color:var(--text3)">${p.leverage_range}</span>
+          <span style="font-size:10px;color:var(--text3)">·</span>
+          <span style="font-size:10px;color:var(--text3)">${p.holding_period}</span>
+        ` : ''}
+      </div>
+      <!-- 价格行（非观望）或等待原因 -->
+      ${!isWait ? `
+        <div style="border-top:1px solid rgba(255,255,255,0.06);border-bottom:1px solid rgba(255,255,255,0.06);
+          padding:5px 0;margin-bottom:6px">
+          ${priceHtml}
+        </div>
+      ` : ''}
+      <!-- 理由 -->
+      <div style="font-size:10px;color:var(--text3);line-height:1.4">${p.reason || ''}</div>
+    </div>`;
+  }
+
+  const grid = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${personas.map(buildCard).join('')}
+    </div>`;
+
+  return `
+  <div class="card" style="border-left:3px solid #5c6bc0;padding:12px 14px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="font-size:13px;font-weight:700;color:var(--text1)">🧑‍💼 多风格信号台</span>
+      <span style="font-size:10px;color:var(--text3)">四位交易员各自解读当前市场</span>
+    </div>
+    ${consensusBar}
+    ${grid}
+  </div>`;
 }
 
 function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressure = null) {
@@ -2664,13 +3752,118 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
   // 是否为无合约数据的现货品种（黄金等）
   const _isFuturesSymbol = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT'].includes(currentSymbol);
 
+  // 精简模式 — 紧凑关键价位卡（最近3阻力 + 2支撑）
+  const nearRes = [...(resistances||[])].sort((a,b)=>a.price-b.price).slice(0,3);
+  const nearSup = [...(supports||[])].sort((a,b)=>b.price-a.price).slice(0,2);
+  const compactSR = `
+    <div class="card">
+      <div class="card-title">关键价位</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <div style="font-size:10px;color:var(--text3);margin-bottom:5px">支撑</div>
+          ${nearSup.map(s=>`
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="color:var(--bull);font-size:12px;font-weight:600">${fmt(s.price)}</span>
+              <span style="font-size:10px;color:var(--bull)">-${s.dist_pct.toFixed(2)}%</span>
+              <div style="width:28px;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
+                <div style="width:${Math.min(100,(s.score||0)/8*100).toFixed(0)}%;height:100%;background:var(--bull)"></div>
+              </div>
+            </div>`).join('')}
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--text3);margin-bottom:5px">阻力</div>
+          ${nearRes.map(r=>`
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="color:var(--bear);font-size:12px;font-weight:600">${fmt(r.price)}</span>
+              <span style="font-size:10px;color:var(--bear)">+${r.dist_pct.toFixed(2)}%</span>
+              <div style="width:28px;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
+                <div style="width:${Math.min(100,(r.score||0)/8*100).toFixed(0)}%;height:100%;background:var(--bear)"></div>
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+
+  // ── FR 极端 + CVD 背离警告横幅 ──────────────────────────
+  const _alerts = [];
+  const _fr = funding?.funding_rate;
+  if (_fr != null) {
+    if      (_fr >= 0.10) _alerts.push({ text: `🔥 极度偏多 FR ${_fr.toFixed(4)}% — 多头严重拥挤，做多需谨慎`, col: '#ef5350' });
+    else if (_fr >= 0.05) _alerts.push({ text: `⚠️ FR 偏高 ${_fr.toFixed(4)}% — 多头拥挤，注意回撤风险`, col: '#f9a825' });
+    else if (_fr <= -0.10) _alerts.push({ text: `🔥 极度偏空 FR ${_fr.toFixed(4)}% — 空头严重拥挤，潜在轧空`, col: '#26a69a' });
+    else if (_fr <= -0.05) _alerts.push({ text: `⚠️ FR 偏低 ${_fr.toFixed(4)}% — 空头拥挤，注意反弹风险`, col: '#4db6ac' });
+  }
+  const _cvdSig = rd.cvd?.signal || '';
+  if (_cvdSig.includes('顶背离')) _alerts.push({ text: `📉 CVD 顶背离 — 价格新高但买量萎缩，警惕回调`, col: '#ef5350' });
+  else if (_cvdSig.includes('底背离')) _alerts.push({ text: `📈 CVD 底背离 — 价格新低但卖量减少，关注反弹`, col: '#26a69a' });
+  const _divScore = rd.divergence?.score || 0;
+  const _divSigs  = rd.divergence?.signals || [];
+  if (_divScore >= 2 && _divSigs.length) {
+    _alerts.push({ text: `📈 背离多头 · ${_divSigs.slice(0,2).join(' + ')} — 指标与价格背离，关注潜在反转`, col: '#4db6ac' });
+  } else if (_divScore <= -2 && _divSigs.length) {
+    _alerts.push({ text: `📉 背离空头 · ${_divSigs.slice(0,2).join(' + ')} — 指标顶部背离信号，警惕趋势衰竭`, col: '#ef9a9a' });
+  }
+  const _alertBanner = _alerts.map(a =>
+    `<div class="alert-banner" style="border-left:3px solid ${a.col};background:${a.col}16;color:${a.col}">${a.text}</div>`
+  ).join('');
+
   return `
-    ${buildTradePlanCard(rd)}
-    ${buildComprehensiveOpinion(rd, funding)}
-    ${buildMTFMatrix()}
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;
+      margin:0 0 0 0;position:sticky;top:0;background:var(--bg2);
+      border-bottom:1px solid var(--border);z-index:20">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:11px;color:var(--text3)">分析面板</span>
+        <span id="analysisAge" style="font-size:10px;color:var(--text3)"></span>
+      </div>
+      <div style="display:flex;gap:5px;align-items:center">
+        <button onclick="forceRefreshAnalysis()" title="强制刷新分析" style="font-size:12px;padding:3px 7px;border-radius:12px;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;line-height:1.3">↻</button>
+        <button onclick="openPosCalc()" title="仓位计算器" style="font-size:11px;padding:3px 8px;border-radius:12px;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;line-height:1.3">🧮</button>
+        <button id="focusBtn" onclick="toggleFocusMode()">精简</button>
+      </div>
+    </div>
+    ${_alertBanner}
+    ${buildDecisionBanner(rd)}
+
+    <div class="focus-card">${buildTradePlanCard(rd)}</div>
+    <div class="focus-card">${buildPersonaSignalsCard(rd)}</div>
+    <div class="focus-card">${buildComprehensiveOpinion(rd, funding)}</div>
+    <div class="detail-card">${buildMonteCarloCard(rd)}</div>
+    <div class="focus-card">${buildMTFMatrix()}</div>
+    <div class="focus-card">
     <div class="card">
       <div class="card-title">综合信号 · <span style="color:var(--accent)">${_symDisplay}</span> [${TF_LABELS_FULL[tf]||tf}]</div>
       ${buildRegimeBadge(rd)}
+      ${(() => {
+        const ms = rd?.market_structure;
+        if (!ms || !ms.structure || ms.structure === 'unknown') return '';
+        const isBull = ms.structure === 'bullish';
+        const isBear = ms.structure === 'bearish';
+        const sc = ms.structure_score || 0;
+        const col  = isBull ? '#26a69a' : isBear ? '#ef5350' : '#78909c';
+        const icon = isBull ? '↑' : isBear ? '↓' : '↔';
+        const lastEv = (ms.events || []).slice(-1)[0];
+        const evHtml = lastEv
+          ? `<span style="font-size:10px;color:#78909c;margin-left:6px">${lastEv.cn} · $${Math.round(lastEv.price).toLocaleString()}</span>`
+          : '';
+        return `<div style="display:flex;align-items:center;gap:6px;margin:4px 0 6px;flex-wrap:wrap">
+          <span style="font-size:11px;font-weight:600;color:${col};background:${col}22;
+            padding:2px 8px;border-radius:4px;border:1px solid ${col}55">${icon} ${ms.structure_cn||''} ${sc>=0?'+':''}${sc}</span>
+          ${evHtml}
+        </div>`;
+      })()}
+      ${(() => {
+        const cp = rd.candle_patterns;
+        if (!cp || !cp.patterns || cp.patterns.length === 0) return '';
+        const typeCol = { bullish:'#26a69a', bearish:'#ef5350', neutral:'#78909c' };
+        return `<div style="display:flex;flex-wrap:wrap;gap:4px;margin:0 0 6px">
+          ${cp.patterns.slice(0,3).map(p => {
+            const c = typeCol[p.type] || '#78909c';
+            return `<span style="font-size:10px;padding:2px 7px;border-radius:4px;
+              background:${c}18;color:${c};border:1px solid ${c}40;cursor:default"
+              title="${p.desc}">${p.icon} ${p.name}</span>`;
+          }).join('')}
+        </div>`;
+      })()}
       ${buildSignalDimensionCard(rd)}
       <div class="overall-box" style="border-left-color:${oc}">
         <div class="overall-text" style="color:${oc}">${rd.overall}</div>
@@ -2711,7 +3904,11 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
         <tr style="font-weight:700;border-top:1px solid #2a2e39"><td>合计</td><td style="color:${oc}">${rd.score>=0?'+':''}${rd.score} / ${rd.max_score}</td></tr>
       </table>
     </div>
+    </div>
 
+    <div class="focus-card">${compactSR}</div>
+
+    <div class="detail-card">
     ${rd.backtest ? (() => {
       const bt = rd.backtest;
       const hasData = bt.win_rate != null;
@@ -2916,17 +4113,28 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
       </div>
     </div>` : ''}
     ${buildOBPressureCard(obPressure)}
-    ${_isFuturesSymbol
-      ? buildFundingCard(funding, rd)
-      : `<div class="card"><div class="card-title">资金费率 / 持仓量</div>
-           <div style="color:var(--text3);font-size:12px;padding:6px 0">
-             ${_symDisplay} 为现货品种，无合约资金费率数据</div></div>`}
+    </div>
+
+    <div class="focus-card">
+    ${_isFuturesSymbol ? buildFundingCard(funding, rd) : ''}
+    ${_isFuturesSymbol ? buildOICard(rd) : ''}
+    ${buildMiniObCard(obPressure)}
+    </div>
+
+    <div class="detail-card">
+    ${!_isFuturesSymbol ? `
+      <div class="card"><div class="card-title">资金费率 / 持仓量</div>
+        <div style="color:var(--text3);font-size:12px;padding:6px 0">${_symDisplay} 为现货品种，无合约资金费率数据</div></div>
+      <div class="card"><div class="card-title">持仓量 (OI)</div>
+        <div style="color:var(--text3);font-size:12px;padding:6px 0">${_symDisplay} 为现货品种，无合约持仓量数据</div></div>` : ''}
     ${buildMarketStructureCard(rd)}
     ${_isFuturesSymbol
-      ? buildOICard(rd)
-      : `<div class="card"><div class="card-title">持仓量 (OI)</div>
+      ? buildLSRatioCard(rd)
+      : `<div class="card"><div class="card-title">⚖️ 多空比 (L/S Ratio)</div>
            <div style="color:var(--text3);font-size:12px;padding:6px 0">
-             ${_symDisplay} 为现货品种，无合约持仓量数据</div></div>`}
+             ${_symDisplay} 为现货品种，无合约多空比数据</div></div>`}
+    ${buildWhaleTradesCard()}
+    ${buildMacroCard(rd)}
     ${buildOnChainCard(rd)}
     ${buildOnChainRealCard()}
     ${buildVolumeProfileCard(rd)}
@@ -2942,6 +4150,7 @@ function buildAnalysisHTML(tf, rd, supports, resistances, fib, funding, obPressu
     <div class="card">
       <div class="card-title">Fibonacci 回调位</div>
       <table><tr><th>位置</th><th>价格</th><th>距当前</th></tr>${fibRows}</table>
+    </div>
     </div>`;
 }
 
@@ -3017,6 +4226,35 @@ function showChartLoading(show) {
   if (s && show) s.textContent = '加载中...';
 }
 
+/* ══════════════════════════════════════════════════════
+   成交量异常检测（K线拉取后调用）
+══════════════════════════════════════════════════════ */
+function checkVolumeAnomaly(candles, tf) {
+  const tag = document.getElementById('volSpikeTag');
+  if (!tag || !candles || candles.length < 25) { if (tag) tag.style.display = 'none'; return; }
+  const vols = candles.map(c => c.v).filter(v => v > 0);
+  const avgVol = vols.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;  // 最近20根均量
+  const lastVol = vols[vols.length - 1];
+  const ratio   = avgVol > 0 ? lastVol / avgVol : 0;
+
+  if (ratio >= 2.5) {
+    tag.style.display = '';
+    tag.style.background = ratio >= 4 ? '#ef535033' : '#f9a82522';
+    tag.style.color      = ratio >= 4 ? '#ef5350'   : '#f9a825';
+    tag.style.border     = `1px solid ${ratio >= 4 ? '#ef535066' : '#f9a82566'}`;
+    tag.textContent      = `⚡ 量能异常 ${ratio.toFixed(1)}×`;
+    // 仅在量能极端时 toast（避免频繁打扰）
+    const key = `vol_${tf}_${candles.length}`;
+    if (ratio >= 4 && Date.now() - (_alertTS[key] || 0) > 5 * 60 * 1000) {
+      _alertTS[key] = Date.now();
+      const isUp = candles[candles.length - 1].c > candles[candles.length - 1].o;
+      showToast(`⚡ ${TF_LABELS[tf]} 量能异常 ${ratio.toFixed(1)}× 均值 — ${isUp ? '放量上涨' : '放量下跌'}`, isUp ? 'bull' : 'bear');
+    }
+  } else {
+    tag.style.display = 'none';
+  }
+}
+
 async function fetchKlinesAndRender(tf) {
   showChartLoading(true);
   try {
@@ -3033,14 +4271,18 @@ async function fetchKlinesAndRender(tf) {
       if (d.volume_profile !== undefined) analysisData[tf].volume_profile   = d.volume_profile;
       if (d.market_structure !== undefined) analysisData[tf].market_structure = d.market_structure;
     }
+    // 缓存K线供叠加层重绘
+    _lastKlines = { candles: d.candles, supports: d.supports, resistances: d.resistances, fib: d.fib, tf };
     // 桌面：6面板完整图
     renderDesktopChart(d.candles, d.supports, d.resistances, d.fib, tf);
     // 手机：主K线图（2面板）
     renderMainChart(d.candles, d.supports, d.resistances, d.fib, tf);
     showChartLoading(false);
+    // ── 成交量异常检测 ─────────────────────────────────────
+    checkVolumeAnomaly(d.candles, tf);
     // 如果手机副图正在显示，同步渲染
     if (isMobile && mobileTab === 'sub') renderSubChart(d.candles);
-  } catch(e) { showChartLoading(false); console.warn('klines fetch failed', e); }
+  } catch(e) { showChartLoading(false); console.warn('klines fetch failed', e); showToast('⚠ K线数据获取失败，请检查网络', 'bear'); }
 }
 
 async function fetchSubChart(tf) {
@@ -3066,7 +4308,7 @@ function calcYRange(candles) {
   return [pMin - pad, pMax + pad];
 }
 
-function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZones, fvgZones, volumeProfile, tradePlan) {
+function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZones, fvgZones, volumeProfile, tradePlan, rd) {
   const T  = candles.map(c=>c.t);
   const x0 = T[0], x1 = T[T.length-1];
   const [yMin, yMax] = yRange;
@@ -3111,14 +4353,16 @@ function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZone
     }
   });
 
-  (resistances||[]).filter(r=>inView(r.price)).forEach(r => {
-    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:r.price,y1:r.price,line:{color:'rgba(239,83,80,0.7)',width:1.2,dash:'dot'}});
-    anns.push({xref:'paper',yref:'y',x:1.01,y:r.price,text:`阻 ${Math.round(r.price).toLocaleString()}`,showarrow:false,font:{color:'#ef5350',size:10},xanchor:'left'});
-  });
-  (supports||[]).filter(s=>inView(s.price)).forEach(s => {
-    shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:s.price,y1:s.price,line:{color:'rgba(38,166,154,0.7)',width:1.2,dash:'dot'}});
-    anns.push({xref:'paper',yref:'y',x:1.01,y:s.price,text:`撑 ${Math.round(s.price).toLocaleString()}`,showarrow:false,font:{color:'#26a69a',size:10},xanchor:'left'});
-  });
+  if (_chartOverlays.sr !== false) {
+    (resistances||[]).filter(r=>inView(r.price)).forEach(r => {
+      shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:r.price,y1:r.price,line:{color:'rgba(239,83,80,0.7)',width:1.2,dash:'dot'}});
+      anns.push({xref:'paper',yref:'y',x:1.01,y:r.price,text:`阻 ${Math.round(r.price).toLocaleString()}`,showarrow:false,font:{color:'#ef5350',size:10},xanchor:'left'});
+    });
+    (supports||[]).filter(s=>inView(s.price)).forEach(s => {
+      shapes.push({type:'line',xref:'x',yref:'y',x0,x1,y0:s.price,y1:s.price,line:{color:'rgba(38,166,154,0.7)',width:1.2,dash:'dot'}});
+      anns.push({xref:'paper',yref:'y',x:1.01,y:s.price,text:`撑 ${Math.round(s.price).toLocaleString()}`,showarrow:false,font:{color:'#26a69a',size:10},xanchor:'left'});
+    });
+  }
   const fibColors    = ['#b0bec5','#80cbc4','#ffcc02','#ff9800','#ff5722','#e91e63','#9c27b0'];
   // 延伸位专用颜色（金色系，从浅到深）
   const extColors    = ['#ffe082','#ffd54f','#ffca28','#ffc107','#ffb300'];
@@ -3136,7 +4380,7 @@ function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZone
   });
 
   // ── Fair Value Gap 色带（价格失衡区）────────────────────
-  (fvgZones || []).slice(0, 6).forEach(fvg => {
+  if (_chartOverlays.fvg !== false) (fvgZones || []).slice(0, 6).forEach(fvg => {
     if (!inView(fvg.mid)) return;
     const isBull = fvg.type === 'bullish_fvg';
     const alpha  = (0.06 - fvg.filled_pct * 0.0005).toFixed(2);  // 填充越多颜色越淡
@@ -3158,10 +4402,10 @@ function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZone
       text: isBull ? '🔲↑' : '🔲↓',
       showarrow:false, font:{color: isBull ? '#4db6ac' : '#ef9a9a', size:9}, xanchor:'right'
     });
-  });
+  }); // end FVG
 
   // ── Volume Profile 关键线（POC / VAH / VAL）───────────────
-  if (volumeProfile && volumeProfile.poc) {
+  if (_chartOverlays.vp !== false && volumeProfile && volumeProfile.poc) {
     const vpLines = [
       { price: volumeProfile.poc, color:'rgba(255,152,0,0.85)', label:'POC', w:1.5 },
       { price: volumeProfile.vah, color:'rgba(255,183,77,0.5)',  label:'VAH', w:0.8 },
@@ -3183,7 +4427,7 @@ function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZone
   }
 
   // ── 交易计划关键价位线 ──────────────────────────────────
-  if (tradePlan) {
+  if (_chartOverlays.plan !== false && tradePlan) {
     const tp = tradePlan;
     const planLines = [];
     if (tp.entry_price)  planLines.push({ price: tp.entry_price,  color:'rgba(100,181,246,0.9)',  label:`入场 ${Math.round(tp.entry_price).toLocaleString()}`,  dash:'dashdot', w:1.5 });
@@ -3200,6 +4444,33 @@ function buildSRShapes(candles, supports, resistances, fib, yRange, stopHuntZone
       anns.push({ xref:'paper', yref:'y', x:1.01, y:pl.price,
         text: pl.label, showarrow:false,
         font:{ color: pl.color, size:9, family:'monospace' }, xanchor:'left'
+      });
+    });
+  }
+
+  // ── 市场结构事件（BOS / CHoCH）────────────────────────────
+  if (_chartOverlays.ms !== false) {
+    const msEvents = rd?.market_structure?.events || [];
+    msEvents.slice(-6).forEach(ev => {
+      if (!ev?.price || !inView(ev.price)) return;
+      const isBull  = ev.type?.includes('UP');
+      const isChoch = ev.type?.startsWith('CHoCH');
+      const col = isChoch ? (isBull ? '#4db6ac' : '#ef9a9a')
+                          : (isBull ? '#26a69a' : '#ef5350');
+      shapes.push({
+        type:'line', xref:'x', yref:'y', x0, x1,
+        y0: ev.price, y1: ev.price,
+        line:{ color:col, width:1, dash: isChoch ? 'dot' : 'dash' },
+        opacity: 0.5
+      });
+      const label = (ev.type||'').replace('_UP','↑').replace('_DOWN','↓');
+      anns.push({
+        xref:'paper', yref:'y', x:0, y:ev.price,
+        xanchor:'left', yanchor:'middle',
+        text: `${isChoch ? '◈' : '◆'} ${label}`,
+        showarrow:false,
+        font:{ size:9, color:col },
+        bgcolor:'rgba(18,22,34,0.7)'
       });
     });
   }
@@ -3232,7 +4503,8 @@ function renderDesktopChart(candles, supports, resistances, fib, tf) {
     _rdDesktop?.stop_hunt_zones,
     _tfDataDesk?.fvg_zones,
     _tfDataDesk?.volume_profile,
-    _rdDesktop?.trade_plan
+    _rdDesktop?.trade_plan,
+    _rdDesktop
   );
 
   [70,30].forEach(lv => shapes.push({type:'line',xref:'x5',yref:'y5',x0,x1,y0:lv,y1:lv,line:{color:lv===70?'rgba(239,83,80,0.4)':'rgba(38,166,154,0.4)',width:1,dash:'dash'}}));
@@ -3315,7 +4587,8 @@ function renderMainChart(candles, supports, resistances, fib, tf) {
     _rdMobile?.stop_hunt_zones,
     _tfDataMob?.fvg_zones,
     _tfDataMob?.volume_profile,
-    _rdMobile?.trade_plan
+    _rdMobile?.trade_plan,
+    _rdMobile
   );
 
   const traces = [
@@ -3421,20 +4694,233 @@ window.addEventListener('resize', () => {
 /* ══════════════════════════════════════════════════════
    初始化
 ══════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   实时盘口压力（每30秒）
+══════════════════════════════════════════════════════ */
+async function fetchObLive() {
+  try {
+    const r = await fetch(`/api/orderbook?symbol=${currentSymbol}&limit=5`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.error || !d.ob_pressure) return;
+    obPressureCache[currentSymbol] = d.ob_pressure;
+    // 只更新迷你盘口卡，避免全量重渲染
+    if (analysisData[currentTf]) {
+      updateSidebar(currentTf);
+      if (isMobile) updateMobileAnalysis(currentTf);
+    }
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════════════════
+   数据时效 & 强制刷新
+══════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   图表叠加层开关
+══════════════════════════════════════════════════════ */
+function toggleOverlay(key) {
+  _chartOverlays[key] = !_chartOverlays[key];
+  localStorage.setItem('chartOverlays', JSON.stringify(_chartOverlays));
+  document.querySelectorAll(`.overlay-btn[data-key="${key}"]`).forEach(b => b.classList.toggle('active', _chartOverlays[key]));
+  if (_lastKlines) {
+    const { candles, supports, resistances, fib, tf } = _lastKlines;
+    renderDesktopChart(candles, supports, resistances, fib, tf);
+    renderMainChart(candles, supports, resistances, fib, tf);
+  }
+}
+
+function initOverlayBtns() {
+  document.querySelectorAll('.overlay-btn[data-key]').forEach(b => {
+    b.classList.toggle('active', _chartOverlays[b.dataset.key] !== false);
+  });
+}
+
+function updateAnalysisAge() {
+  if (!_lastAnalysisTs) return;
+  const sec = Math.floor((Date.now() - _lastAnalysisTs) / 1000);
+  const txt = sec < 60 ? `${sec}s前` : sec < 3600 ? `${Math.floor(sec/60)}m前` : `${Math.floor(sec/3600)}h前`;
+  document.querySelectorAll('#analysisAge').forEach(el => el.textContent = txt);
+}
+
+async function forceRefreshAnalysis() {
+  const btn = document.querySelector('[onclick="forceRefreshAnalysis()"]');
+  if (btn) { btn.style.animation = 'spin .6s linear 1'; setTimeout(() => btn.style.animation = '', 700); }
+  await fetchKlinesAndRender(currentTf);
+  showToast('✓ 分析已刷新', 'bull');
+}
+
+/* ══════════════════════════════════════════════════════
+   一键复制信号摘要
+══════════════════════════════════════════════════════ */
+function copySignalSummary() {
+  const data = analysisData[currentTf];
+  if (!data) return;
+  const rd  = data.rd;
+  const tp  = rd.trade_plan;
+  const mtf = window._mtfConf;
+  const g   = window._currentGrade;
+  const fmt = p => p != null ? '$' + Math.round(p).toLocaleString('en-US') : '--';
+
+  const lines = [
+    `📊 ${currentSymbol} | ${TF_LABELS_FULL[currentTf]||currentTf}`,
+    `方向: ${rd.overall || '--'}  评分: ${rd.score>=0?'+':''}${rd.score}/${rd.max_score}${g ? '  评级: '+g[0] : ''}`,
+  ];
+  if (tp && ['long','short'].includes(tp.direction)) {
+    lines.push(`入场: ${fmt(tp.entry_price)}  SL: ${fmt(tp.sl_price)}  止损幅: ${tp.sl_dist_pct?.toFixed(2)||'--'}%`);
+    const tpLvl = tp.tp_levels || [];
+    if (tpLvl[0]) lines.push(`TP1: ${fmt(tpLvl[0].price)}  R:R ${tpLvl[0].rr?.toFixed(1)||'--'}`);
+    if (tpLvl[1]) lines.push(`TP2: ${fmt(tpLvl[1].price)}  R:R ${tpLvl[1].rr?.toFixed(1)||'--'}`);
+  }
+  if (mtf) lines.push(`MTF共振: ${mtf.aligned}/${mtf.total}周期  共振分: ${mtf.score>=0?'+':''}${mtf.score}`);
+  if (rd.confidence_pct != null) lines.push(`历史置信度: ${rd.confidence_pct}% ${rd.confidence_level||''}`);
+  if (_fng) lines.push(`恐慌/贪婪: ${_fng.value} · ${_fng.label}`);
+  lines.push(`时间: ${new Date().toLocaleString('zh-CN',{hour12:false})}`);
+
+  const text = lines.join('\n');
+  const copy = () => { showToast('📋 信号摘要已复制', 'bull'); };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(copy).catch(() => {
+      const ta = Object.assign(document.createElement('textarea'), {value: text, style: 'position:fixed;opacity:0'});
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); copy();
+    });
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   恐慌/贪婪指数（alternative.me · 每4h刷新）
+══════════════════════════════════════════════════════ */
+async function fetchFearGreed() {
+  try {
+    const r = await fetch('https://api.alternative.me/fng/?limit=1');
+    if (!r.ok) return;
+    const d = await r.json();
+    const v = +d.data[0].value;
+    const l = d.data[0].value_classification;
+    const col = v >= 75 ? '#ef5350' : v >= 55 ? '#f9a825' : v >= 45 ? '#78909c' : v >= 25 ? '#4db6ac' : '#26a69a';
+    _fng = { value: v, label: l, col };
+  } catch {}
+}
+
+/* ══════════════════════════════════════════════════════
+   大单流水（/api/trades/recent · 每60s刷新）
+══════════════════════════════════════════════════════ */
+async function fetchWhaleTrades() {
+  try {
+    const r = await fetch(`/api/trades/recent?symbol=${currentSymbol}&min_usdt=100000`);
+    if (!r.ok) return;
+    const d = await r.json();
+    _whaleTrades = (d.trades || []).slice(0, 10);
+    // 如果分析面板已渲染则更新大单卡片
+    const el = document.getElementById('whaleTradesCard');
+    if (el) el.innerHTML = _buildWhaleRows();
+  } catch {}
+}
+
+function _buildWhaleRows() {
+  if (!_whaleTrades.length) return '<div style="font-size:11px;color:var(--text3);text-align:center;padding:8px 0">暂无大单数据</div>';
+  const now = Date.now();
+  return _whaleTrades.map(t => {
+    const age    = now - t.time;
+    const ageStr = age < 60000 ? `${Math.round(age/1000)}s` : age < 3600000 ? `${Math.round(age/60000)}m` : `${Math.round(age/3600000)}h`;
+    const isBuy  = t.is_buyer;
+    const col    = isBuy ? '#26a69a' : '#ef5350';
+    const icon   = isBuy ? '▲' : '▼';
+    const usdtK  = t.usdt >= 1000000 ? (t.usdt/1000000).toFixed(2)+'M' : Math.round(t.usdt/1000)+'K';
+    return `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border2);font-size:11px">
+      <span style="color:var(--text3);min-width:24px;font-size:10px">${ageStr}</span>
+      <span style="color:${col};font-weight:700;font-size:12px">${icon}</span>
+      <span style="color:${col};font-weight:600;flex:1">${isBuy ? '主动买' : '主动卖'}</span>
+      <span style="color:var(--text)">${t.qty.toFixed(2)} BTC</span>
+      <span style="color:${col};font-weight:600;min-width:44px;text-align:right">$${usdtK}</span>
+    </div>`;
+  }).join('');
+}
+
+function buildWhaleTradesCard() {
+  return `<div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🐋 大单流水 <span style="font-size:10px;color:var(--text3);font-weight:400">&gt;$100K</span></span>
+      <span style="font-size:10px;color:var(--text3)">60s 刷新</span>
+    </div>
+    <div id="whaleTradesCard">${_buildWhaleRows()}</div>
+  </div>`;
+}
+
 async function init() {
+  // 恢复上次选中周期
+  const savedTf = localStorage.getItem('tf');
+  if (savedTf && TF_LIST.includes(savedTf)) currentTf = savedTf;
   initSymbolSelects();
   buildMobileTfBar();
   fetchPrice();
   fetchFunding();
+  fetchObLive();
   fetchOnchain();
+  fetchFearGreed();
+  fetchWhaleTrades();
+  updateSessionClock();
   await pollStatus();
   setInterval(pollStatus, 5000);
   setInterval(fetchPrice, 10000);
   setInterval(fetchFunding, 30000);
-  setInterval(fetchOnchain, 1800000);  // 30分钟刷新链上数据
+  setInterval(fetchObLive, 30000);
+  setInterval(fetchWhaleTrades, 60000);
+  setInterval(updateSessionClock, 60000);
+  setInterval(updateAnalysisAge, 15000);
+  setInterval(fetchOnchain, 1800000);
+  setInterval(fetchFearGreed, 14400000); // 每4小时
+
+  // 键盘快捷键：1-8 切换时间框架
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    const tfMap = {'1':'15m','2':'30m','3':'1h','4':'2h','5':'4h','6':'8h','7':'1d','8':'1w'};
+    if (tfMap[e.key]) switchTf(tfMap[e.key]);
+  });
+
+  // 移动端：图表区左右滑动切换周期
+  let _touchX = 0, _touchY = 0;
+  const _swipeEl = document.getElementById('appMain');
+  if (_swipeEl) {
+    _swipeEl.addEventListener('touchstart', e => {
+      _touchX = e.touches[0].clientX;
+      _touchY = e.touches[0].clientY;
+    }, { passive: true });
+    _swipeEl.addEventListener('touchend', e => {
+      if (mobileTab === 'chart' || mobileTab === 'sub') return; // 图表 tab 交给 Plotly 处理
+      const dx = e.changedTouches[0].clientX - _touchX;
+      const dy = e.changedTouches[0].clientY - _touchY;
+      if (Math.abs(dx) < 55 || Math.abs(dy) > Math.abs(dx) * 0.8) return; // 非横向滑动忽略
+      const idx = TF_LIST.indexOf(currentTf);
+      if (dx < 0 && idx < TF_LIST.length - 1) switchTf(TF_LIST[idx + 1]); // 左滑 → 更长周期
+      else if (dx > 0 && idx > 0)              switchTf(TF_LIST[idx - 1]); // 右滑 → 更短周期
+    }, { passive: true });
+  }
+
+  // 初始化叠加层按钮激活状态
+  initOverlayBtns();
 }
 
 init();
 </script>
+<div id="toast-container"></div>
+
+<!-- 仓位计算器面板 -->
+<div id="posCalcPanel">
+  <button id="calcCloseBtn" onclick="closePosCalc()">✕</button>
+  <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">🧮 仓位计算器</div>
+  <div class="calc-grid">
+    <div><div class="calc-label">账户余额 (USDT)</div>
+      <input id="calBalance" type="number" placeholder="10000" oninput="calcPosition()"></div>
+    <div><div class="calc-label">单笔风险 (%)</div>
+      <input id="calRisk" type="number" placeholder="1" step="0.1" min="0.1" max="10" oninput="calcPosition()"></div>
+    <div><div class="calc-label">入场价 ($)</div>
+      <input id="calEntry" type="number" placeholder="自动填入" oninput="calcPosition()"></div>
+    <div><div class="calc-label">止损价 ($)</div>
+      <input id="calSL" type="number" placeholder="自动填入" oninput="calcPosition()"></div>
+  </div>
+  <div class="calc-result" id="calcResult">
+    <div style="font-size:11px;color:var(--text3);text-align:center">请填写账户余额和入场/止损价格</div>
+  </div>
+</div>
 </body>
 </html>

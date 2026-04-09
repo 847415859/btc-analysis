@@ -1071,7 +1071,8 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                     liq_clusters: list = None, df_backtest: pd.DataFrame = None,
                     market_structure: dict = None, fvg_zones: list = None,
                     volume_profile: dict = None, oi_data: dict = None,
-                    htf_direction: str = "neutral"):
+                    htf_direction: str = "neutral", ls_ratio_data: dict = None,
+                    macro_data: dict = None, mc_n_sims: int = 1500):
     latest = df.iloc[-1]
     prev   = df.iloc[-2]
     price  = latest["close"]
@@ -2061,6 +2062,186 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         emit("  无 OI 数据")
         rd["oi"] = None
 
+    # ── 多空比 Long/Short Ratio ─────────────────────────────
+    emit(f"\n【多空比 Long/Short Ratio】{sep}")
+    if ls_ratio_data:
+        try:
+            # 价格方向（近 4 根 K 线）
+            _ls_p_4h  = float(df["close"].iloc[-5]) if len(df) >= 5 else price
+            _ls_pchg  = (price - _ls_p_4h) / _ls_p_4h * 100
+            _price_dir = "up" if _ls_pchg > 0.3 else ("down" if _ls_pchg < -0.3 else "flat")
+
+            ls_score   = 0
+            ls_signals = []
+
+            # ① 大户持仓多空比（最核心——反映主力仓位方向）
+            tp_data = ls_ratio_data.get("top_position", [])
+            tp_info = {}
+            tp_score = 0
+            if len(tp_data) >= 5:
+                tp_now  = float(tp_data[-1]["longShortRatio"])
+                tp_prev = float(tp_data[-5]["longShortRatio"])
+                tp_chg  = (tp_now - tp_prev) / max(tp_prev, 0.001) * 100
+                tp_long  = float(tp_data[-1].get("longPosition",  0.5)) * 100
+                tp_short = float(tp_data[-1].get("shortPosition", 0.5)) * 100
+                tp_info  = {"ratio": round(tp_now, 4), "chg_pct": round(tp_chg, 2),
+                            "long_pct": round(tp_long, 2), "short_pct": round(tp_short, 2)}
+                if   tp_chg > 5  and _price_dir == "up":
+                    tp_score = +2; ls_signals.append(f"✅ 大户持仓加多({tp_chg:+.1f}%) + 价格↑ → 趋势延续")
+                elif tp_chg < -5 and _price_dir == "up":
+                    tp_score = -2; ls_signals.append(f"⚠️ 背离预警: 价格↑ 但大户持仓多空比↓({tp_chg:+.1f}%) → 主力派发")
+                elif tp_chg > 5  and _price_dir == "down":
+                    tp_score = +1; ls_signals.append(f"📌 大户逆势增多({tp_chg:+.1f}%) + 价格↓ → 底部吸筹信号")
+                elif tp_chg < -5 and _price_dir == "down":
+                    tp_score = -1; ls_signals.append(f"大户减多({tp_chg:+.1f}%) + 价格↓ → 下跌延续确认")
+                elif tp_now > 1.5:
+                    tp_score = +1; ls_signals.append(f"大户持仓多空比偏高({tp_now:.3f}) → 多头主导")
+                elif tp_now < 0.7:
+                    tp_score = -1; ls_signals.append(f"大户持仓多空比偏低({tp_now:.3f}) → 空头主导")
+            ls_score += tp_score
+
+            # ② 散户全账户多空比（逆向指标——散户极端情绪往往是反转信号）
+            gr_data = ls_ratio_data.get("global", [])
+            gr_info = {}
+            gr_score = 0
+            if len(gr_data) >= 2:
+                gr_now   = float(gr_data[-1]["longShortRatio"])
+                gr_long  = float(gr_data[-1].get("longAccount",  0.5)) * 100
+                gr_short = float(gr_data[-1].get("shortAccount", 0.5)) * 100
+                gr_info  = {"ratio": round(gr_now, 4),
+                            "long_pct": round(gr_long, 2), "short_pct": round(gr_short, 2)}
+                if   gr_now > 1.5:
+                    gr_score = -1; ls_signals.append(f"⚠️ 散户情绪过热(多空比{gr_now:.3f}) → 逆向谨慎做空")
+                elif gr_now < 0.65:
+                    gr_score = +1; ls_signals.append(f"✅ 散户极度恐慌(多空比{gr_now:.3f}) → 逆向抄底机会")
+            ls_score += gr_score
+
+            # ③ 大户账户 vs 散户背离（经典机构陷阱信号）
+            ta_data = ls_ratio_data.get("top_account", [])
+            ta_info = {}
+            ta_score = 0
+            if len(ta_data) >= 2 and len(gr_data) >= 2:
+                ta_now   = float(ta_data[-1]["longShortRatio"])
+                ta_long  = float(ta_data[-1].get("longAccount",  0.5)) * 100
+                ta_short = float(ta_data[-1].get("shortAccount", 0.5)) * 100
+                ta_info  = {"ratio": round(ta_now, 4),
+                            "long_pct": round(ta_long, 2), "short_pct": round(ta_short, 2)}
+                gr_now_  = float(gr_data[-1]["longShortRatio"])
+                if   ta_now > 1.2 and gr_now_ < 0.8:
+                    ta_score = +1; ls_signals.append(f"✅ 大户做多({ta_now:.3f})/散户做空({gr_now_:.3f}) → 经典看涨配置")
+                elif ta_now < 0.8 and gr_now_ > 1.2:
+                    ta_score = -1; ls_signals.append(f"⚠️ 大户做空({ta_now:.3f})/散户做多({gr_now_:.3f}) → 经典看跌陷阱")
+            ls_score += ta_score
+
+            # 限幅 ±3，计入总分
+            ls_score = max(-3, min(3, ls_score))
+            score    += ls_score
+            max_score += 3
+
+            # 输出
+            if tp_info:
+                emit(f"  大户持仓多空比: {tp_info['ratio']:.3f}  (4h变化: {tp_info['chg_pct']:+.2f}%)  "
+                     f"多: {tp_info['long_pct']:.1f}% / 空: {tp_info['short_pct']:.1f}%")
+            if ta_info:
+                emit(f"  大户账户多空比: {ta_info['ratio']:.3f}  "
+                     f"多: {ta_info['long_pct']:.1f}% / 空: {ta_info['short_pct']:.1f}%")
+            if gr_info:
+                emit(f"  散户全账户比:   {gr_info['ratio']:.3f}  "
+                     f"多: {gr_info['long_pct']:.1f}% / 空: {gr_info['short_pct']:.1f}%")
+            emit(f"  价格方向: {_price_dir} ({_ls_pchg:+.2f}%)")
+            for sig in ls_signals:
+                emit(f"  {sig}")
+            emit(f"  多空比评分: {ls_score:+d}")
+
+            rd["ls_ratio"] = {
+                "score":        ls_score,
+                "signals":      ls_signals,
+                "global":       gr_info if gr_info else None,
+                "top_account":  ta_info if ta_info else None,
+                "top_position": tp_info if tp_info else None,
+                "price_dir":    _price_dir,
+                "price_chg_pct": round(_ls_pchg, 2),
+            }
+        except Exception as e:
+            emit(f"  多空比分析异常: {e}")
+            rd["ls_ratio"] = None
+    else:
+        emit("  无多空比数据（现货品种或数据获取失败）")
+        rd["ls_ratio"] = None
+
+    # ── 宏观关联层（DXY + NASDAQ，仅 2H+ 周期生效）──────────
+    # BTC 与 DXY 负相关（DXY 强 → BTC 弱），与 NASDAQ 正相关（NASDAQ 强 → BTC 强）
+    # 仅在中长周期（2小时及以上）纳入评分，短周期噪音太大不适用
+    _MACRO_TF_SET = {"2小时", "4小时", "8小时", "日线", "周线"}
+    emit(f"\n【宏观关联层 · DXY & NASDAQ】{sep}")
+    macro_score    = 0
+    macro_signals  = []
+    macro_eligible = tf_label in _MACRO_TF_SET
+    if macro_data and macro_eligible:
+        try:
+            dxy    = macro_data.get("dxy")    or {}
+            nasdaq = macro_data.get("nasdaq") or {}
+
+            # DXY：负相关 → 上涨扣分，下跌加分
+            dxy_dir = dxy.get("direction", "flat")
+            dxy_chg = dxy.get("chg_pct", 0.0)
+            if dxy_dir == "up":
+                macro_score -= 1
+                macro_signals.append(f"⚠️ DXY 强势上行 ({dxy_chg:+.2f}%) → 美元走强，BTC 承压 −1")
+            elif dxy_dir == "down":
+                macro_score += 1
+                macro_signals.append(f"✅ DXY 走弱 ({dxy_chg:+.2f}%) → 美元贬值，利好 BTC +1")
+            else:
+                macro_signals.append(f"  DXY 横盘 ({dxy_chg:+.2f}%)，无方向性影响")
+
+            # NASDAQ：正相关 → 上涨加分，下跌扣分
+            nas_dir = nasdaq.get("direction", "flat")
+            nas_chg = nasdaq.get("chg_pct", 0.0)
+            if nas_dir == "up":
+                macro_score += 1
+                macro_signals.append(f"✅ NASDAQ 上行 ({nas_chg:+.2f}%) → 风险资产偏好上升，利多 BTC +1")
+            elif nas_dir == "down":
+                macro_score -= 1
+                macro_signals.append(f"⚠️ NASDAQ 下行 ({nas_chg:+.2f}%) → 风险资产规避，BTC 承压 −1")
+            else:
+                macro_signals.append(f"  NASDAQ 横盘 ({nas_chg:+.2f}%)，无方向性影响")
+
+            # 限幅 ±2
+            macro_score = max(-2, min(2, macro_score))
+            score      += macro_score
+            max_score  += 2
+
+            emit(f"  DXY:    {dxy.get('price', 'N/A')}  日变化 {dxy_chg:+.3f}%")
+            emit(f"  NASDAQ: {nasdaq.get('price', 'N/A')}  日变化 {nas_chg:+.3f}%")
+            for sig in macro_signals:
+                emit(f"  {sig}")
+            emit(f"  宏观评分: {macro_score:+d}")
+
+            rd["macro"] = {
+                "score":   macro_score,
+                "signals": macro_signals,
+                "dxy":     dxy,
+                "nasdaq":  nasdaq,
+                "eligible": True,
+            }
+        except Exception as e:
+            emit(f"  宏观分析异常: {e}")
+            rd["macro"] = None
+    elif macro_data and not macro_eligible:
+        emit(f"  当前周期（{tf_label}）不纳入宏观评分（仅 2H+ 有效）")
+        dxy    = macro_data.get("dxy")    or {}
+        nasdaq = macro_data.get("nasdaq") or {}
+        rd["macro"] = {
+            "score":   0,
+            "signals": [],
+            "dxy":     dxy,
+            "nasdaq":  nasdaq,
+            "eligible": False,
+        }
+    else:
+        emit("  无宏观数据")
+        rd["macro"] = None
+
     # ── ATR 风险管理（不参与评分，仅展示）────────────────
     _atr_val = df["atr"].iloc[-1]
     if pd.isna(_atr_val):
@@ -2102,7 +2283,7 @@ def generate_report(df: pd.DataFrame, supports, resistances,
         hb = hb_map.get(tf_label, 4)
         bt = run_backtest(_df_bt, current_sig, hold_bars=hb,
                           atr_sl_mult=1.5, atr_tp_mult=3.0,
-                          min_samples=20, similarity_thresh=0.62)
+                          min_samples=30, similarity_thresh=0.62)
 
         score += bt["score"]
         max_score += 2   # 回测模块最多 ±2 分，分母同步扩大
@@ -2159,7 +2340,38 @@ def generate_report(df: pd.DataFrame, supports, resistances,
                "overall_color": oc, "action": action,
                "bull_bar": "█"*max(0,score), "bear_bar": "░"*max(0,-score)})
 
-    rd["trade_plan"] = _generate_trade_plan(rd)
+    rd["trade_plan"]    = _generate_trade_plan(rd)
+
+    # ── 成交量放大倍数（供人格信号台使用）──────────────────────
+    try:
+        _vols = df["volume"].dropna().values
+        if len(_vols) >= 31:
+            _vol_avg30 = float(np.mean(_vols[-31:-1]))
+            rd["volume_surge_2x"]  = bool(_vol_avg30 > 0 and _vols[-1] > 2.0 * _vol_avg30)
+            rd["volume_ratio_30"]  = round(_vols[-1] / _vol_avg30, 2) if _vol_avg30 > 0 else 1.0
+        else:
+            rd["volume_surge_2x"]  = False
+            rd["volume_ratio_30"]  = 1.0
+    except Exception:
+        rd["volume_surge_2x"]  = False
+        rd["volume_ratio_30"]  = 1.0
+
+    rd["persona_plans"] = _generate_persona_plans(rd)
+
+    # ── 蒙特卡洛概率分析（mc_n_sims=0 表示跳过，用于 Android 极速首轮）──
+    _tp_plan = rd["trade_plan"]
+    if mc_n_sims > 0 and _tp_plan.get("direction") in ("long", "short"):
+        _tp_prices = [t["price"] for t in _tp_plan.get("tp_levels", [])]
+        if _tp_plan.get("sl_price") and _tp_prices:
+            _tp_plan["monte_carlo"] = run_monte_carlo(
+                df          = df,
+                entry_price = _tp_plan["entry_price"],
+                sl_price    = _tp_plan["sl_price"],
+                tp_prices   = _tp_prices,
+                is_long     = (_tp_plan["direction"] == "long"),
+                n_sims      = mc_n_sims,
+            )
+
     return score, "\n".join(lines), rd
 
 
@@ -2180,11 +2392,15 @@ def _generate_trade_plan(rd: dict) -> dict:
         return {"direction": "wait", "direction_cn": "观望 ↔️",
                 "color": "#f9a825", "reason": "价格数据异常"}
 
-    # ── 方向判定（动态阈值，与 generate_report 保持一致）───────────────
-    _thresh = rd.get("sig_threshold") or max(5, round(max_sc * 0.33))
-    if   score >= _thresh:  direction = "long"
-    elif score <= -_thresh: direction = "short"
-    else:                   direction = "wait"
+    # ── 方向判定（双阈值：正式信号 33%，投机信号 20%）───────────────
+    _thresh      = rd.get("sig_threshold") or max(5, round(max_sc * 0.33))
+    _spec_thresh = max(3, round(max_sc * 0.20))   # 投机区间下限
+
+    if   score >= _thresh:       direction = "long";  is_speculative = False
+    elif score <= -_thresh:      direction = "short"; is_speculative = False
+    elif score >= _spec_thresh:  direction = "long";  is_speculative = True
+    elif score <= -_spec_thresh: direction = "short"; is_speculative = True
+    else:                        direction = "wait";  is_speculative = False
 
     if direction == "wait":
         sups = rd.get("supports")  or []
@@ -2193,6 +2409,7 @@ def _generate_trade_plan(rd: dict) -> dict:
         sup1 = sups[0].get("price") if sups else None
         return {
             "direction": "wait", "direction_cn": "观望 ↔️", "color": "#f9a825",
+            "is_speculative": False,
             "reason": f"综合评分 {score:+d}/{max_sc}，多空信号不明确，建议等待方向确认（阈值 ±{_thresh}）",
             "condition_long":  f"突破阻力 {'$'+f'{res1:,.0f}' if res1 else '关键阻力位'} 且评分 ≥ +{_thresh} → 转多",
             "condition_short": f"跌破支撑 {'$'+f'{sup1:,.0f}' if sup1 else '关键支撑位'} 且评分 ≤ −{_thresh} → 转空",
@@ -2246,7 +2463,8 @@ def _generate_trade_plan(rd: dict) -> dict:
         atr_pct = atr_val / price * 100
 
     # ── 止损候选优先级辅助 ────────────────────────────────────
-    _prio = {"structural": 0, "liq": 1, "support": 2, "resistance": 2, "atr": 3}
+    # ob_wall 与 liq 同级（均属于"市场结构确认止损"，优于普通 S/R）
+    _prio = {"structural": 0, "liq": 1, "ob_wall": 1, "support": 2, "resistance": 2, "atr": 3}
 
     def _best_sl(candidates):
         """从候选列表中按优先级选出最合理的止损价"""
@@ -2268,6 +2486,11 @@ def _generate_trade_plan(rd: dict) -> dict:
             sl_cands.append(("结构型（摆动低点−0.5ATR）", key_low - 0.5 * atr_val, "structural"))
         if liq_sl_long:
             sl_cands.append(("清算区优化止损", liq_sl_long, "liq"))
+        # OB 挂单墙止损：买单墙（orderbook_bid）被击穿说明买方保护失效
+        _ob_bid_walls = [s for s in sup_sorted if "orderbook_bid" in s.get("source", "")]
+        if _ob_bid_walls:
+            _ob_wall_p = _ob_bid_walls[0]["price"]
+            sl_cands.append(("OB买单墙下方−0.3ATR", _ob_wall_p - 0.3 * atr_val, "ob_wall"))
         if sup_sorted:
             sl_cands.append(("最近支撑−0.5ATR", sup_sorted[0]["price"] - 0.5 * atr_val, "support"))
         sl_cands.append(("ATR×1.5止损", atr_data.get("sl_long") or price - 1.5 * atr_val, "atr"))
@@ -2278,33 +2501,50 @@ def _generate_trade_plan(rd: dict) -> dict:
         sl_price = round(sl_price, 2)
         sl_dist_pct = round((price - sl_price) / price * 100, 2)
 
+        # ── 失效价位（信号失效条件，不同于止损）────────────────
+        # 失效 = 做多论据彻底崩溃的结构性价位（止损之下更深一层）
+        _inval_cands_l = [s for s in sup_sorted
+                          if s["price"] < sl_price and s.get("score", 0) >= 2.0]
+        if _inval_cands_l:
+            inval_price    = _inval_cands_l[0]["price"]
+            inval_note     = f"次级结构支撑（{_inval_cands_l[0].get('source','pivot').split('+')[0]}）"
+        elif key_low and key_low < sl_price:
+            inval_price    = round(key_low - 1.0 * atr_val, 2)
+            inval_note     = "摆动低点 − 1×ATR"
+        else:
+            inval_price    = round(sl_price - 1.0 * atr_val, 2)
+            inval_note     = "止损位 − 1×ATR 保守失效线"
+        inval_price        = round(inval_price, 2)
+        inval_dist_pct     = round((price - inval_price) / price * 100, 2)
+        inval_condition    = f"若日线收盘跌破 ${inval_price:,.2f}，做多论据完全失效"
+
         # ── 入场价位 ─────────────────────────────────────
         near_hunt = any(z.get("near_hunt") and z.get("type") == "long_stop_hunt"
                         for z in hunt_zones)
-        if score >= 8 and not near_hunt:
+        if score >= _thresh and not near_hunt:
             entry_method = "市价追入"
             entry_price  = price
-            entry_note   = f"动能强劲（评分 {score:+d}），可直接市价入场"
+            entry_note   = f"评分 {score:+d} 已过正式门槛，立即市价做多"
         elif sup_sorted and in_range(sup_sorted[0]["price"]):
             entry_price  = round(sup_sorted[0]["price"] * 1.001, 2)
             entry_method = "限价挂单（支撑区）"
-            entry_note   = f"价格已在支撑 ${sup_sorted[0]['price']:,.0f} 附近，可限价建仓"
+            entry_note   = f"在 ${sup_sorted[0]['price']:,.0f} 挂限价买单（支撑区，距现价 {abs(price - sup_sorted[0]['price']) / price * 100:.1f}%）"
         elif poc and in_range(poc) and poc < price:
             entry_price  = round(poc, 2)
             entry_method = "限价挂单（VP POC）"
-            entry_note   = f"价格接近成交量POC ${poc:,.0f}，价值共识买入区"
+            entry_note   = f"在 POC ${poc:,.0f} 挂限价买单（成交量价值共识区）"
         elif sup_sorted:
             entry_price  = round(sup_sorted[0]["price"] + atr_val * 0.1, 2)
-            entry_method = "等待回调限价"
-            entry_note   = f"建议等回调至支撑 ${sup_sorted[0]['price']:,.0f} 附近再入场"
+            entry_method = "预挂限价（等回调）"
+            entry_note   = f"现在在 ${entry_price:,.0f} 预挂限价买单，等价格回调至支撑区触发"
         elif val_ and val_ < price:
             entry_price  = round(val_, 2)
-            entry_method = "等待回调至VA下沿"
-            entry_note   = f"等待回调至价值区间下沿 VAL ${val_:,.0f}"
+            entry_method = "预挂限价（VA下沿）"
+            entry_note   = f"在价值区下沿 VAL ${val_:,.0f} 预挂限价买单"
         else:
             entry_price  = price
-            entry_method = "市价（无明显支撑）"
-            entry_note   = "无明显支撑参考位，谨慎控制仓位"
+            entry_method = "市价入场（谨慎）"
+            entry_note   = f"无结构支撑参考，若入场用 ${price:,.0f} 市价，严控仓位 ≤0.5%"
         entry_price    = round(entry_price, 2)
         entry_dist_pct = round((price - entry_price) / price * 100, 2)
 
@@ -2356,6 +2596,11 @@ def _generate_trade_plan(rd: dict) -> dict:
             sl_cands.append(("结构型（摆动高点+0.5ATR）", key_high + 0.5 * atr_val, "structural"))
         if liq_sl_short:
             sl_cands.append(("清算区优化止损", liq_sl_short, "liq"))
+        # OB 挂单墙止损：卖单墙（orderbook_ask）被突破说明卖方保护失效
+        _ob_ask_walls = [r for r in res_sorted if "orderbook_ask" in r.get("source", "")]
+        if _ob_ask_walls:
+            _ob_wall_p = _ob_ask_walls[0]["price"]
+            sl_cands.append(("OB卖单墙上方+0.3ATR", _ob_wall_p + 0.3 * atr_val, "ob_wall"))
         if res_sorted:
             sl_cands.append(("最近阻力+0.5ATR", res_sorted[0]["price"] + 0.5 * atr_val, "resistance"))
         sl_cands.append(("ATR×1.5止损", atr_data.get("sl_short") or price + 1.5 * atr_val, "atr"))
@@ -2366,33 +2611,50 @@ def _generate_trade_plan(rd: dict) -> dict:
         sl_price = round(sl_price, 2)
         sl_dist_pct = round((sl_price - price) / price * 100, 2)
 
+        # ── 失效价位（信号失效条件，不同于止损）────────────────
+        # 失效 = 做空论据彻底崩溃的结构性价位（止损之上更高一层）
+        _inval_cands_s = [r for r in res_sorted
+                          if r["price"] > sl_price and r.get("score", 0) >= 2.0]
+        if _inval_cands_s:
+            inval_price    = _inval_cands_s[0]["price"]
+            inval_note     = f"次级结构阻力（{_inval_cands_s[0].get('source','pivot').split('+')[0]}）"
+        elif key_high and key_high > sl_price:
+            inval_price    = round(key_high + 1.0 * atr_val, 2)
+            inval_note     = "摆动高点 + 1×ATR"
+        else:
+            inval_price    = round(sl_price + 1.0 * atr_val, 2)
+            inval_note     = "止损位 + 1×ATR 保守失效线"
+        inval_price        = round(inval_price, 2)
+        inval_dist_pct     = round((inval_price - price) / price * 100, 2)
+        inval_condition    = f"若日线收盘突破 ${inval_price:,.2f}，做空论据完全失效"
+
         # ── 入场价位 ─────────────────────────────────────
         near_hunt = any(z.get("near_hunt") and z.get("type") == "short_stop_hunt"
                         for z in hunt_zones)
-        if score <= -8 and not near_hunt:
+        if score <= -_thresh and not near_hunt:
             entry_price  = price
             entry_method = "市价追入"
-            entry_note   = f"动能强劲（评分 {score:+d}），可直接市价做空"
+            entry_note   = f"评分 {score:+d} 已过正式门槛，立即市价做空"
         elif res_sorted and in_range(res_sorted[0]["price"]):
             entry_price  = round(res_sorted[0]["price"] * 0.999, 2)
             entry_method = "限价挂单（阻力区）"
-            entry_note   = f"价格已触及阻力 ${res_sorted[0]['price']:,.0f}，可限价做空"
+            entry_note   = f"在 ${res_sorted[0]['price']:,.0f} 挂限价卖单（阻力区，距现价 {abs(res_sorted[0]['price'] - price) / price * 100:.1f}%）"
         elif poc and in_range(poc) and poc > price:
             entry_price  = round(poc, 2)
             entry_method = "限价挂单（VP POC）"
-            entry_note   = f"价格接近成交量POC ${poc:,.0f}，可限价做空"
+            entry_note   = f"在 POC ${poc:,.0f} 挂限价卖单（成交量价值共识区）"
         elif res_sorted:
             entry_price  = round(res_sorted[0]["price"] - atr_val * 0.1, 2)
-            entry_method = "等待反弹限价"
-            entry_note   = f"建议等反弹至阻力 ${res_sorted[0]['price']:,.0f} 附近再做空"
+            entry_method = "预挂限价（等反弹）"
+            entry_note   = f"现在在 ${entry_price:,.0f} 预挂限价卖单，等价格反弹至阻力区触发"
         elif vah and vah > price:
             entry_price  = round(vah, 2)
-            entry_method = "等待反弹至VA上沿"
-            entry_note   = f"等待反弹至价值区间上沿 VAH ${vah:,.0f}"
+            entry_method = "预挂限价（VA上沿）"
+            entry_note   = f"在价值区上沿 VAH ${vah:,.0f} 预挂限价卖单"
         else:
             entry_price  = price
-            entry_method = "市价（无明显阻力）"
-            entry_note   = "无明显阻力参考位，谨慎控制仓位"
+            entry_method = "市价入场（谨慎）"
+            entry_note   = f"无结构阻力参考，若入场用 ${price:,.0f} 市价，严控仓位 ≤0.5%"
         entry_price    = round(entry_price, 2)
         entry_dist_pct = round((entry_price - price) / price * 100, 2)
 
@@ -2453,6 +2715,7 @@ def _generate_trade_plan(rd: dict) -> dict:
                 f"等待更优入场点或价格向TP方向移动后再评估。"
             ),
             "rr_tp1": rr1, "rr_quality": rr_quality, "recommended": False,
+            "is_speculative": False,
             "entry_price": entry_price, "sl_price": sl_price, "tp_levels": tp_levels,
         }
 
@@ -2461,10 +2724,20 @@ def _generate_trade_plan(rd: dict) -> dict:
     pos_pct  = min(100, round(1.0 / risk_pct * 100))
     pos_note = f"按账户 1% 风险：仓位约 {pos_pct}%（止损幅度 {risk_pct:.2f}%）"
 
+    # 投机信号修正：降低方向色彩强度、标注限制仓位
+    if is_speculative:
+        direction_cn = "投机做多 🎲" if is_long else "投机做空 🎲"
+        col          = "#f9a825" if is_long else "#ff7043"
+        recommended  = False   # 投机信号不主动推荐，用户自主决定
+    else:
+        direction_cn = "做多 📈" if is_long else "做空 📉"
+        col          = "#26a69a" if is_long else "#ef5350"
+
     return {
         "direction":      direction,
-        "direction_cn":   "做多 📈" if is_long else "做空 📉",
-        "color":          "#26a69a" if is_long else "#ef5350",
+        "direction_cn":   direction_cn,
+        "color":          col,
+        "is_speculative": is_speculative,
         "score":          score,
         "max_score":      max_sc,
         "entry_method":   entry_method,
@@ -2481,7 +2754,482 @@ def _generate_trade_plan(rd: dict) -> dict:
         "recommended":    recommended,
         "position_note":  pos_note,
         "near_hunt_warn": near_hunt,
+        # ── 信号失效条件（与止损是两个不同概念）────────────────
+        # SL = 风险管理触发线；invalidation = 做多/做空论据结构性失效价位
+        "invalidation": {
+            "price":     inval_price,
+            "note":      inval_note,
+            "dist_pct":  inval_dist_pct,
+            "condition": inval_condition,
+        },
     }
+
+
+# ─────────────────────────────────────────────
+# F-1b. 四位交易员人格信号台
+# ─────────────────────────────────────────────
+
+def _generate_persona_plans(rd: dict) -> dict:
+    """
+    基于同一份 rd 数据，用四种交易风格各自生成独立交易建议。
+    四位人格：老王（激进）/ 李姐（稳健）/ 陈博士（量化）/ 老秃（逆势）
+    """
+    score  = rd.get("score", 0) or 0
+    price  = rd.get("price",  0) or 0
+    max_sc = rd.get("max_score", 14) or 14
+    if not price:
+        wait = {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                "entry_price": None, "sl_price": None, "tp_levels": [],
+                "rr_tp1": None, "confidence_stars": 0, "reason": "价格数据异常"}
+        return {p: {**wait, "persona_id": p, "persona_name": n, "persona_icon": ic,
+                    "persona_style": st, "leverage_range": lv, "holding_period": hp}
+                for p, n, ic, st, lv, hp in [
+                    ("laowang",   "老王",   "🔴", "激进短线猎手", "10x-20x", "15m ~ 4h"),
+                    ("lijie",     "李姐",   "🟡", "稳健波段操盘", "3x-5x",   "4h ~ 3天"),
+                    ("chenboshi", "陈博士", "🔵", "量化逻辑派",   "2x-3x",   "1天 ~ 1周"),
+                    ("laotu",     "老秃",   "⚫", "逆势猎庄者",   "5x-10x",  "1h ~ 1天"),
+                ]}
+
+    atr_data   = rd.get("atr") or {}
+    atr_val    = float(atr_data.get("val") or price * 0.015)
+    if atr_val <= 0: atr_val = price * 0.015
+
+    ms_data    = rd.get("market_structure") or {}
+    key_high   = (ms_data.get("key_high") or {}).get("price")
+    key_low    = (ms_data.get("key_low")  or {}).get("price")
+
+    vp         = rd.get("volume_profile") or {}
+    poc        = vp.get("poc")
+    vah        = vp.get("vah")
+    val_       = vp.get("val")
+
+    hunt_zones = rd.get("stop_hunt_zones") or []
+
+    sup_sorted = sorted(
+        [s for s in (rd.get("supports")    or []) if s.get("price", 0) < price],
+        key=lambda x: x["price"], reverse=True)
+    res_sorted = sorted(
+        [r for r in (rd.get("resistances") or []) if r.get("price", 0) > price],
+        key=lambda x: x["price"])
+
+    rsi_data   = rd.get("rsi")  or {}
+    rsi_val    = float(rsi_data.get("val") or 50)
+    macd_data  = rd.get("macd") or {}
+    cvd_data   = rd.get("cvd")  or {}
+    div_data   = rd.get("divergence") or {}
+    div_sigs   = div_data.get("signals") or []
+
+    _thresh      = rd.get("sig_threshold") or max(5, round(max_sc * 0.33))
+    _spec_thresh = max(3, round(max_sc * 0.20))
+
+    backtest    = rd.get("backtest") or {}
+    conf_pct    = backtest.get("confidence_pct") or 0
+    bt_rr       = float(backtest.get("rr_ratio") or 0)
+
+    htf_gate    = rd.get("htf_gate") or {}
+    htf_gated   = htf_gate.get("gated", False)
+
+    in_range = lambda p: p and abs(price - p) / price < (float(atr_data.get("pct") or 1.5) / 100) * 1.5
+
+    def _fmt_reason(*parts):
+        return "，".join(p for p in parts if p)
+
+    # ─── 老王 — 激进短线猎手 ───────────────────────────────────
+    def _persona_laowang():
+        if score == 0:
+            return {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                    "entry_price": None, "sl_price": None, "tp_levels": [],
+                    "rr_tp1": None, "confidence_stars": 2,
+                    "reason": "评分恰好中性，老王也不轻易开单"}
+        is_long = score > 0
+        ep      = price
+        sl      = round(ep - atr_val if is_long else ep + atr_val, 2)
+        risk    = abs(ep - sl)
+        tps = []
+        for mult, lbl in [(1.0, "R×1"), (2.0, "R×2"), (3.5, "R×3.5")]:
+            tp_p = round(ep + mult * risk if is_long else ep - mult * risk, 2)
+            rr   = round(mult, 2)
+            tps.append({"price": tp_p, "label": lbl, "rr": rr,
+                        "dist_pct": round((tp_p - ep) / ep * 100 if is_long else (ep - tp_p) / ep * 100, 2)})
+        # 置信星数
+        stars = 4 if abs(score) >= _thresh else (3 if abs(score) >= _spec_thresh else 2)
+        # 理由
+        macd_sig  = macd_data.get("hist_trend") or macd_data.get("signal") or ""
+        cvd_sig   = cvd_data.get("signal") or ""
+        reason_parts = [
+            f"评分 {score:+d}/{max_sc}，动量{'偏强' if abs(score) >= _thresh else '偏弱'}",
+            f"MACD {macd_sig}" if macd_sig else "",
+            f"CVD {cvd_sig}"   if cvd_sig  else "",
+        ]
+        sl_dist_pct = round(abs(ep - sl) / ep * 100, 2)
+        return {
+            "direction":    "long" if is_long else "short",
+            "direction_cn": "做多 📈" if is_long else "做空 📉",
+            "color":        "#26a69a" if is_long else "#ef5350",
+            "entry_price":  ep,
+            "entry_method": "市价追入",
+            "sl_price":     sl,
+            "sl_dist_pct":  sl_dist_pct,
+            "tp_levels":    tps,
+            "rr_tp1":       tps[0]["rr"] if tps else None,
+            "confidence_stars": stars,
+            "reason":       _fmt_reason(*reason_parts),
+        }
+
+    # ─── 李姐 — 稳健波段 ───────────────────────────────────────
+    def _persona_lijie():
+        # 门槛：正式信号 + 无HTF冲突
+        if abs(score) < _thresh or htf_gated:
+            cond = "HTF趋势冲突，逆势交易风险高" if htf_gated else f"评分 {score:+d} 不足 ±{_thresh}"
+            return {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                    "entry_price": None, "sl_price": None, "tp_levels": [],
+                    "rr_tp1": None, "confidence_stars": 2 if htf_gated else 1,
+                    "reason": f"李姐暂不操作：{cond}，等待更优入场机会"}
+        is_long = score > 0
+        # 入场：只接受支撑/阻力近区限价
+        if is_long and sup_sorted and in_range(sup_sorted[0]["price"]):
+            ep     = round(sup_sorted[0]["price"] * 1.001, 2)
+            e_meth = f"限价买单（支撑 ${sup_sorted[0]['price']:,.0f}）"
+            stars  = 4
+        elif not is_long and res_sorted and in_range(res_sorted[0]["price"]):
+            ep     = round(res_sorted[0]["price"] * 0.999, 2)
+            e_meth = f"限价卖单（阻力 ${res_sorted[0]['price']:,.0f}）"
+            stars  = 4
+        else:
+            # 无近区限价机会 → 观望
+            lvl = (sup_sorted[0]["price"] if is_long and sup_sorted else
+                   (res_sorted[0]["price"] if res_sorted else None))
+            reason_w = (f"等待回调至支撑 ${lvl:,.0f} 再限价建仓" if is_long else
+                        f"等待反弹至阻力 ${lvl:,.0f} 再限价做空") if lvl else "无合适限价机会，继续观望"
+            return {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                    "entry_price": None, "sl_price": None, "tp_levels": [],
+                    "rr_tp1": None, "confidence_stars": 3, "reason": reason_w}
+        # 结构止损（宽）
+        if is_long:
+            sl = round((key_low - 0.5 * atr_val) if key_low and key_low < price
+                       else (ep - 1.5 * atr_val), 2)
+        else:
+            sl = round((key_high + 0.5 * atr_val) if key_high and key_high > price
+                       else (ep + 1.5 * atr_val), 2)
+        sl_dist_pct = round(abs(ep - sl) / ep * 100, 2)
+        risk = abs(ep - sl)
+        # TP：优先 VP VAH/VAL，其次阻力/支撑，再用 R 倍数
+        tps = []
+        if is_long:
+            if vah and vah > ep * 1.005:
+                tps.append({"price": round(vah, 2), "label": "VP VAH",
+                             "rr": round((vah - ep) / risk, 2) if risk else 0,
+                             "dist_pct": round((vah - ep) / ep * 100, 2)})
+            if res_sorted and len(tps) < 2:
+                r1 = res_sorted[0]["price"]
+                tps.append({"price": round(r1, 2), "label": "阻力位",
+                             "rr": round((r1 - ep) / risk, 2) if risk else 0,
+                             "dist_pct": round((r1 - ep) / ep * 100, 2)})
+        else:
+            if val_ and val_ < ep * 0.995:
+                tps.append({"price": round(val_, 2), "label": "VP VAL",
+                             "rr": round((ep - val_) / risk, 2) if risk else 0,
+                             "dist_pct": round((ep - val_) / ep * 100, 2)})
+            if sup_sorted and len(tps) < 2:
+                s1 = sup_sorted[0]["price"]
+                tps.append({"price": round(s1, 2), "label": "支撑位",
+                             "rr": round((ep - s1) / risk, 2) if risk else 0,
+                             "dist_pct": round((ep - s1) / ep * 100, 2)})
+        if not tps:
+            tp_p = round(ep + 2.0 * risk if is_long else ep - 2.0 * risk, 2)
+            tps.append({"price": tp_p, "label": "R×2",
+                        "rr": 2.0, "dist_pct": round(abs(tp_p - ep) / ep * 100, 2)})
+        ma_sig = rd.get("ma_group_score") or 0
+        rsi_sig = rsi_data.get("signal") or ""
+        reason = _fmt_reason(
+            f"评分 {score:+d}，HTF方向一致" if not htf_gated else "",
+            f"均线{'做多' if ma_sig > 0 else '做空'}信号 ({ma_sig:+d})" if ma_sig else "",
+            f"RSI {rsi_val:.0f} {rsi_sig}" if rsi_sig else "",
+        )
+        return {
+            "direction":    "long" if is_long else "short",
+            "direction_cn": "做多 📈" if is_long else "做空 📉",
+            "color":        "#26a69a" if is_long else "#ef5350",
+            "entry_price":  ep, "entry_method": e_meth,
+            "sl_price":     sl, "sl_dist_pct": sl_dist_pct,
+            "tp_levels":    tps[:2],
+            "rr_tp1":       tps[0]["rr"] if tps else None,
+            "confidence_stars": stars, "reason": reason,
+        }
+
+    # ─── 陈博士 — 量化逻辑派 ──────────────────────────────────
+    def _persona_chenboshi():
+        # 门槛：正式信号 + 回测置信 >= 60%
+        formal_ok = abs(score) >= _thresh
+        conf_ok   = conf_pct >= 60
+        if not formal_ok or not conf_ok:
+            if conf_pct > 0:
+                reason_w = (f"回测置信度 {conf_pct}% 不足 60%，陈博士按兵不动" if not conf_ok else
+                            f"评分 {score:+d} 不足 ±{_thresh}，信号强度不够")
+            else:
+                reason_w = f"暂无足够回测数据（评分 {score:+d}），陈博士需要更多证据"
+            stars = (3 if conf_pct >= 45 else 2) if conf_pct else 1
+            return {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                    "entry_price": None, "sl_price": None, "tp_levels": [],
+                    "rr_tp1": None, "confidence_stars": stars, "reason": reason_w}
+        is_long = score > 0
+        # 入场：POC 优先
+        if poc and abs(poc - price) / price < 0.01:
+            ep     = round(poc, 2)
+            e_meth = f"限价（VP POC ${poc:,.0f}）"
+        elif is_long and sup_sorted:
+            ep     = round(sup_sorted[0]["price"] * 1.001, 2)
+            e_meth = f"限价（支撑 ${sup_sorted[0]['price']:,.0f}）"
+        elif not is_long and res_sorted:
+            ep     = round(res_sorted[0]["price"] * 0.999, 2)
+            e_meth = f"限价（阻力 ${res_sorted[0]['price']:,.0f}）"
+        else:
+            ep     = price
+            e_meth = "市价（无更优位置）"
+        # ATR×1.5 量化止损
+        sl = round(ep - 1.5 * atr_val if is_long else ep + 1.5 * atr_val, 2)
+        sl_dist_pct = round(abs(ep - sl) / ep * 100, 2)
+        risk = abs(ep - sl)
+        # TP：基于 backtest rr_ratio
+        target_rr = bt_rr if bt_rr >= 1.5 else 2.0
+        tps = []
+        for mult, lbl in [(target_rr, f"R×{target_rr:.1f}（回测期望）"),
+                          (target_rr * 1.5, f"R×{target_rr*1.5:.1f}")]:
+            tp_p = round(ep + mult * risk if is_long else ep - mult * risk, 2)
+            tps.append({"price": tp_p, "label": lbl,
+                        "rr": round(mult, 2),
+                        "dist_pct": round(abs(tp_p - ep) / ep * 100, 2)})
+        mtf_note = (rd.get("mtf_bias") or {}).get("note") or ""
+        stars = 5 if conf_pct >= 75 else (4 if conf_pct >= 60 else 3)
+        reason = _fmt_reason(
+            f"回测置信 {conf_pct}%，评分 {score:+d}/{max_sc}",
+            f"MTF：{mtf_note[:20]}" if mtf_note else "",
+            f"R:R 目标 {target_rr:.1f}x",
+        )
+        return {
+            "direction":    "long" if is_long else "short",
+            "direction_cn": "做多 📈" if is_long else "做空 📉",
+            "color":        "#42a5f5" if is_long else "#ce93d8",
+            "entry_price":  ep, "entry_method": e_meth,
+            "sl_price":     sl, "sl_dist_pct": sl_dist_pct,
+            "tp_levels":    tps[:2],
+            "rr_tp1":       tps[0]["rr"] if tps else None,
+            "confidence_stars": stars, "reason": reason,
+        }
+
+    # ─── 老秃 — 逆势猎庄者 ────────────────────────────────────
+    def _persona_laotu():
+        is_long = None
+        trigger = ""
+        ep = None
+        # 判断触发条件
+        if rsi_val >= 72:
+            is_long = False
+            trigger = f"RSI {rsi_val:.0f} 过热，反向做空"
+        elif rsi_val <= 28:
+            is_long = True
+            trigger = f"RSI {rsi_val:.0f} 超卖，逆向做多"
+        else:
+            # 寻找猎杀区
+            for hz in hunt_zones:
+                if hz.get("near_hunt"):
+                    if hz.get("type") == "long_stop_hunt":
+                        is_long = True
+                        ep      = hz.get("price")
+                        trigger = f"流动性猎取区 ${ep:,.0f}，扫单后反弹"
+                        break
+                    elif hz.get("type") == "short_stop_hunt":
+                        is_long = False
+                        ep      = hz.get("price")
+                        trigger = f"流动性猎取区 ${ep:,.0f}，扫单后回落"
+                        break
+        if is_long is None:
+            return {"direction": "wait", "direction_cn": "观望", "color": "#78909c",
+                    "entry_price": None, "sl_price": None, "tp_levels": [],
+                    "rr_tp1": None, "confidence_stars": 0,
+                    "reason": f"RSI {rsi_val:.0f} 无极值，无猎杀区，老秃静待机会"}
+        # 入场价
+        if ep is None:
+            # RSI 极值入场：用 POC 或当前价
+            ep = round(poc, 2) if poc and abs(poc - price) / price < 0.02 else price
+        ep = round(ep, 2)
+        # 止损：猎杀区另一侧 + 0.3ATR，或结构止损
+        if is_long:
+            sl = round((ep - 0.3 * atr_val) if not hunt_zones else
+                       (ep - 0.5 * atr_val), 2)
+            if key_low and key_low < ep:
+                sl = round(key_low - 0.3 * atr_val, 2)
+        else:
+            sl = round((ep + 0.3 * atr_val) if not hunt_zones else
+                       (ep + 0.5 * atr_val), 2)
+            if key_high and key_high > ep:
+                sl = round(key_high + 0.3 * atr_val, 2)
+        sl_dist_pct = round(abs(ep - sl) / ep * 100, 2)
+        risk = abs(ep - sl)
+        # TP：结构目标
+        tps = []
+        if is_long:
+            cands = [(r["price"], "阻力位") for r in res_sorted[:2] if r["price"] > ep * 1.003]
+            if vah and vah > ep * 1.003: cands.insert(0, (vah, "VP VAH"))
+            if key_high and key_high > ep * 1.003: cands.append((key_high, "摆动高点"))
+        else:
+            cands = [(s["price"], "支撑位") for s in sup_sorted[:2] if s["price"] < ep * 0.997]
+            if val_ and val_ < ep * 0.997: cands.insert(0, (val_, "VP VAL"))
+            if key_low and key_low < ep * 0.997: cands.append((key_low, "摆动低点"))
+        for cp, clbl in cands[:2]:
+            tps.append({"price": round(cp, 2), "label": clbl,
+                        "rr": round(abs(cp - ep) / risk, 2) if risk else 0,
+                        "dist_pct": round(abs(cp - ep) / ep * 100, 2)})
+        if not tps:
+            tp_p = round(ep + 2.5 * risk if is_long else ep - 2.5 * risk, 2)
+            tps.append({"price": tp_p, "label": "R×2.5", "rr": 2.5,
+                        "dist_pct": round(abs(tp_p - ep) / ep * 100, 2)})
+        # 置信星数
+        has_div = bool(div_sigs)
+        if (rsi_val >= 72 or rsi_val <= 28) and has_div:
+            stars = 5
+        elif rsi_val >= 72 or rsi_val <= 28:
+            stars = 4
+        elif any(hz.get("near_hunt") for hz in hunt_zones):
+            stars = 3
+        else:
+            stars = 2
+        reason = _fmt_reason(
+            trigger,
+            f"背离信号：{div_sigs[0][:20]}" if has_div else "",
+        )
+        return {
+            "direction":    "long" if is_long else "short",
+            "direction_cn": "逆势做多 🔄" if is_long else "逆势做空 🔄",
+            "color":        "#ab47bc" if is_long else "#ec407a",
+            "entry_price":  ep, "entry_method": "逆势入场",
+            "sl_price":     sl, "sl_dist_pct": sl_dist_pct,
+            "tp_levels":    tps[:2],
+            "rr_tp1":       tps[0]["rr"] if tps else None,
+            "confidence_stars": stars, "reason": reason,
+        }
+
+    personas = {
+        "laowang":   {**_persona_laowang(),   "persona_id": "laowang",   "persona_name": "老王",
+                      "persona_icon": "🔴", "persona_style": "激进短线猎手",
+                      "leverage_range": "10x-20x", "holding_period": "15m ~ 4h"},
+        "lijie":     {**_persona_lijie(),     "persona_id": "lijie",     "persona_name": "李姐",
+                      "persona_icon": "🟡", "persona_style": "稳健波段操盘",
+                      "leverage_range": "3x-5x",   "holding_period": "4h ~ 3天"},
+        "chenboshi": {**_persona_chenboshi(), "persona_id": "chenboshi", "persona_name": "陈博士",
+                      "persona_icon": "🔵", "persona_style": "量化逻辑派",
+                      "leverage_range": "2x-3x",   "holding_period": "1天 ~ 1周"},
+        "laotu":     {**_persona_laotu(),     "persona_id": "laotu",     "persona_name": "老秃",
+                      "persona_icon": "⚫", "persona_style": "逆势猎庄者",
+                      "leverage_range": "5x-10x",  "holding_period": "1h ~ 1天"},
+    }
+    return personas
+
+
+# ─────────────────────────────────────────────
+# F-1c. 蒙特卡洛概率分布引擎
+# ─────────────────────────────────────────────
+
+def run_monte_carlo(df, entry_price, sl_price, tp_prices,
+                    is_long=True, n_sims=1500, horizon_bars=20):
+    """
+    Bootstrap Monte Carlo：从历史收益率分布有放回抽样，
+    模拟 n_sims 条价格路径，统计各 TP/SL 的首次触及概率。
+    使用 Bootstrap 而非参数化 GBM：自然继承真实分布的偏度和胖尾，无需 scipy。
+    """
+    try:
+        closes = df["close"].dropna().values
+        if len(closes) < 30 or not entry_price or not sl_price or not tp_prices:
+            return None
+
+        log_ret = np.diff(np.log(closes[-200:].astype(float)))
+        if len(log_ret) < 10:
+            return None
+
+        mu    = float(np.mean(log_ret))
+        sigma = float(np.std(log_ret)) or 1e-9
+
+        # 偏度/峰度（纯 numpy，无需 scipy）
+        normed      = (log_ret - mu) / sigma
+        skewness    = float(np.mean(normed ** 3))
+        kurt_excess = float(np.mean(normed ** 4)) - 3.0
+
+        # Bootstrap 路径生成
+        rng     = np.random.default_rng()
+        idx     = rng.integers(0, len(log_ret), size=(n_sims, horizon_bars))
+        sampled = log_ret[idx]                                         # (n_sims, horizon_bars)
+        paths   = entry_price * np.exp(np.cumsum(sampled, axis=1))    # (n_sims, horizon_bars)
+
+        # 终价分布（黑天鹅分析）
+        terminal = paths[:, -1]
+
+        # 首次触及分析
+        # outcomes 编码：0=ongoing, 1=SL, 2=TP1, 3=TP2, 4=TP3
+        outcomes = np.zeros(n_sims, dtype=np.int8)
+        # 多头 TP 从低到高排，空头从高到低排（首先触及最近目标）
+        tp_sorted = sorted(tp_prices)
+        if not is_long:
+            tp_sorted = list(reversed(tp_sorted))
+
+        for t in range(horizon_bars):
+            bar     = paths[:, t]
+            running = outcomes == 0
+            if not np.any(running):
+                break
+            if is_long:
+                outcomes = np.where(running & (bar <= sl_price), 1, outcomes)
+                running  = outcomes == 0
+                for k, tp in enumerate(tp_sorted, start=2):
+                    outcomes = np.where(running & (bar >= tp), k, outcomes)
+                    running  = outcomes == 0
+            else:
+                outcomes = np.where(running & (bar >= sl_price), 1, outcomes)
+                running  = outcomes == 0
+                for k, tp in enumerate(tp_sorted, start=2):
+                    outcomes = np.where(running & (bar <= tp), k, outcomes)
+                    running  = outcomes == 0
+
+        total     = float(n_sims)
+        prob_sl   = round(float(np.sum(outcomes == 1)) / total * 100, 1)
+        prob_tp1  = round(float(np.sum(outcomes >= 2)) / total * 100, 1)  # TP1 或更高
+        prob_tp2  = round(float(np.sum(outcomes >= 3)) / total * 100, 1)
+        prob_tp3  = round(float(np.sum(outcomes == 4)) / total * 100, 1)
+        prob_none = round(float(np.sum(outcomes == 0)) / total * 100, 1)  # horizon 内未触及
+
+        # 期望值（EV）：分段概率 × 各档位盈亏
+        def _pnl(tp): return (tp - entry_price) if is_long else (entry_price - tp)
+        sl_pnl  = (sl_price - entry_price) if is_long else (entry_price - sl_price)
+        tp_pnls = [_pnl(t) for t in tp_sorted[:3]]
+
+        p_only1 = max(0, prob_tp1 - prob_tp2) / 100
+        p_only2 = max(0, prob_tp2 - prob_tp3) / 100
+        p_tp3   = prob_tp3 / 100
+        ev = (prob_sl / 100) * sl_pnl
+        if tp_pnls:                ev += p_only1 * tp_pnls[0]
+        if len(tp_pnls) >= 2:      ev += p_only2 * tp_pnls[1]
+        if len(tp_pnls) >= 3:      ev += p_tp3   * tp_pnls[2]
+        ev_pct = round(ev / (entry_price or 1) * 100, 3)
+
+        return {
+            "n_sims":       n_sims,
+            "horizon_bars": horizon_bars,
+            "vol_pct":      round(sigma * 100, 3),
+            "skewness":     round(skewness, 3),
+            "kurt_excess":  round(kurt_excess, 3),
+            "prob_sl":      prob_sl,
+            "prob_tp1":     prob_tp1,
+            "prob_tp2":     prob_tp2,
+            "prob_tp3":     prob_tp3,
+            "prob_none":    prob_none,
+            "ev_pct":       ev_pct,
+            "p5":           round(float(np.percentile(terminal,  5)), 2),
+            "p25":          round(float(np.percentile(terminal, 25)), 2),
+            "p50":          round(float(np.percentile(terminal, 50)), 2),
+            "p75":          round(float(np.percentile(terminal, 75)), 2),
+            "p95":          round(float(np.percentile(terminal, 95)), 2),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ─────────────────────────────────────────────
@@ -2687,7 +3435,7 @@ def run_backtest(df: pd.DataFrame, current_signal: dict,
                  hold_bars: int = 5,
                  atr_sl_mult: float = 1.5,
                  atr_tp_mult: float = 3.0,
-                 min_samples: int = 20,
+                 min_samples: int = 30,
                  similarity_thresh: float = 0.62) -> dict:
     """
     即时回测引擎：在 df（建议 1500 根以上）中找出与 current_signal
@@ -2886,10 +3634,11 @@ def run_backtest(df: pd.DataFrame, current_signal: dict,
     period_exps    = [v["expectancy"] for v in period_results.values()]
     consistency    = sum(1 for e in period_exps if (e > 0) == (expectancy > 0)) / max(1, len(period_exps))
     raw_conf       = win_rate * sample_weight * (0.7 + 0.3 * consistency)
-    if   raw_conf >= 0.60: conf_level = "高";   conf_pct = int(65 + raw_conf * 30)
-    elif raw_conf >= 0.45: conf_level = "中";   conf_pct = int(45 + raw_conf * 40)
-    elif raw_conf >= 0.30: conf_level = "低";   conf_pct = int(25 + raw_conf * 50)
-    else:                  conf_level = "极低"; conf_pct = int(raw_conf * 80)
+    low_sample_note = "（样本偏少，参考价值有限）" if total_matches < 50 else ""
+    if   raw_conf >= 0.60: conf_level = f"高{low_sample_note}";   conf_pct = int(65 + raw_conf * 30)
+    elif raw_conf >= 0.45: conf_level = f"中{low_sample_note}";   conf_pct = int(45 + raw_conf * 40)
+    elif raw_conf >= 0.30: conf_level = f"低{low_sample_note}";   conf_pct = int(25 + raw_conf * 50)
+    else:                  conf_level = f"极低{low_sample_note}"; conf_pct = int(raw_conf * 80)
     conf_pct = min(95, max(5, conf_pct))
 
     # ── 6. 评分 ─────────────────────────────────────────

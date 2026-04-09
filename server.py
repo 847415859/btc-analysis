@@ -11,6 +11,7 @@ import io
 import math
 import time
 import json
+import pickle
 import socket
 import threading
 import contextlib
@@ -92,6 +93,39 @@ for s in SYMBOLS:
 
 _lock = threading.Lock()
 _update_counter = 0   # 每完成一轮全量刷新后递增
+
+# ── 磁盘缓存路径 ──────────────────────────────────────────
+_DISK_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".analysis_cache.pkl")
+
+def _load_disk_cache():
+    """启动时从磁盘加载上次分析结果，立刻可用，无需等待 API 拉取。"""
+    if not os.path.exists(_DISK_CACHE_FILE):
+        return
+    try:
+        with open(_DISK_CACHE_FILE, "rb") as f:
+            saved = pickle.load(f)
+        loaded = 0
+        for symbol, tf_data in saved.items():
+            if symbol in _cache and isinstance(tf_data, dict) and tf_data:
+                _cache[symbol]["timeframes"] = tf_data
+                _cache[symbol]["ready"]      = True
+                _cache[symbol]["last_update"] = "(磁盘缓存)"
+                loaded += 1
+        if loaded:
+            print(f"[磁盘缓存] 已恢复 {loaded} 个币种的历史分析数据，页面可立即访问")
+    except Exception as e:
+        print(f"[磁盘缓存] 加载失败（将在首轮分析后重建）: {e}")
+
+def _save_disk_cache():
+    """将当前 timeframes 数据写入磁盘，供下次启动快速恢复。"""
+    try:
+        payload = {s: _cache[s].get("timeframes", {}) for s in SYMBOLS}
+        with open(_DISK_CACHE_FILE, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"[磁盘缓存] 写入失败: {e}")
+
+_load_disk_cache()   # ← 启动时立刻执行
 
 
 class _TokenBucket:
@@ -229,6 +263,92 @@ def fetch_open_interest(symbol: str) -> dict:
         return {}
 
 
+def fetch_ls_ratio(symbol: str) -> dict:
+    """
+    获取 Binance 三维多空比（仅期货合约品种，近 48h 的 1h 数据）：
+      global       — globalLongShortAccountRatio  (全账户/散户情绪，逆向指标)
+      top_account  — topLongShortAccountRatio      (大户账户比，机构账户级)
+      top_position — topLongShortPositionRatio     (大户持仓比，最核心的主力方向)
+    返回 {"global": [...], "top_account": [...], "top_position": [...]} 或 {}
+    """
+    if symbol not in FUTURES_SYMBOLS:
+        return {}   # 现货/非合约品种无多空比数据
+    BASE   = "https://fapi.binance.com/futures/data"
+    PARAMS = {"symbol": symbol, "period": "1h", "limit": 48}
+    result = {}
+    for key, path in [
+        ("global",       "/globalLongShortAccountRatio"),
+        ("top_account",  "/topLongShortAccountRatio"),
+        ("top_position", "/topLongShortPositionRatio"),
+    ]:
+        try:
+            r = req.get(BASE + path, params=PARAMS, timeout=6)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) >= 2:
+                    result[key] = data
+        except Exception as e:
+            print(f"[L/S] {symbol} {key} 失败: {e}")
+    return result
+
+
+# ── 宏观关联数据缓存（DXY + NASDAQ，6小时刷新）────────────────────
+_macro_cache:    dict  = {}
+_macro_cache_ts: float = 0.0
+_MACRO_TTL = 21600   # 6 小时
+
+
+def fetch_macro_data() -> dict:
+    """
+    从 Yahoo Finance 免费接口拉取 DXY（美元指数）和 NASDAQ（^IXIC）日线数据。
+    返回:
+      {
+        "dxy":    {"price": float, "chg_pct": float, "direction": "up"/"down"/"flat"},
+        "nasdaq": {"price": float, "chg_pct": float, "direction": "up"/"down"/"flat"},
+        "ts":     float,
+      }
+    接口无需 API Key，返回近 3 个月日线行情。
+    """
+    global _macro_cache, _macro_cache_ts
+    now = time.time()
+    if now - _macro_cache_ts < _MACRO_TTL and _macro_cache:
+        return _macro_cache   # 缓存命中
+
+    result = {}
+    HEADERS = {"User-Agent": "Mozilla/5.0"}
+    for key, ticker in [("dxy", "^DXY"), ("nasdaq", "^IXIC")]:
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+               f"?interval=1d&range=5d")
+        try:
+            r = req.get(url, headers=HEADERS, timeout=8)
+            if r.status_code != 200:
+                print(f"[Macro] {ticker} HTTP {r.status_code}")
+                continue
+            data   = r.json()
+            closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+            # 过滤掉 None 值（Yahoo 偶尔填 null）
+            closes = [c for c in closes if c is not None]
+            if len(closes) < 2:
+                continue
+            cur_p  = float(closes[-1])
+            prev_p = float(closes[-2])
+            chg    = (cur_p - prev_p) / prev_p * 100
+            result[key] = {
+                "price":     round(cur_p, 4),
+                "chg_pct":   round(chg, 3),
+                "direction": "up" if chg > 0.1 else ("down" if chg < -0.1 else "flat"),
+            }
+            print(f"[Macro] {ticker}: {cur_p:.4f}  ({chg:+.3f}%)")
+        except Exception as e:
+            print(f"[Macro] {ticker} 获取失败: {e}")
+
+    if result:
+        result["ts"] = now
+        _macro_cache    = result
+        _macro_cache_ts = now
+    return result
+
+
 # 各币种压力指数历史快照（用于计算速度/趋势）
 _ob_pressure_history = collections.defaultdict(lambda: collections.deque(maxlen=5))
 
@@ -286,24 +406,31 @@ def calculate_ob_pressure(bids: list, asks: list, ref_dist_pct: float = 0.01) ->
 
 
 def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
-                  ob_walls=None, liq_clusters=None, oi_data=None, htf_direction="neutral"):
-    """分析单个周期，返回 {rd, candles, supports, resistances, fib}"""
-    # ── 主数据（500根，用于指标计算、图表、S/R）──────────
+                  ob_walls=None, liq_clusters=None, oi_data=None, htf_direction="neutral",
+                  ls_ratio_data=None, macro_data=None, fast_mode=False):
+    """分析单个周期，返回 {rd, candles, supports, resistances, fib}
+    fast_mode=True：首次启动快速模式，用更少 K 线和更少 Monte Carlo 路径，优先出结果。
+    """
+    # fast_mode 下压缩拉取量（指标计算 200 根已够用）
+    if fast_mode:
+        limit = min(limit, 200)
+    # ── 主数据（用于指标计算、图表、S/R）──────────
     df = fetch_data(symbol=symbol, interval=interval, limit=limit)
     if df.empty:
         return None
     df = calculate_indicators(df, tf_interval=interval)
     # P0-3: 传递 ADX 给 find_support_resistance 用于 Pivot 降权
-    adx_val_for_sr = float(df["adx"].iloc[-1]) if "adx" in df.columns and not pd.isna(df["adx"].iloc[-1]) else None
+    adx_val_for_sr = float(df["adx"].iloc[-1]) if "adx" in df.columns and not np.isnan(float(df["adx"].iloc[-1])) else None
 
     # ── 回测专用扩展历史数据（1500根，提升样本量）──────────
     # 日线/周线本身数据量足够且拉取慢，直接复用 df；短周期单独拉
+    # fast_mode 下跳过扩展拉取，直接复用 df 节省网络 RTT
     BT_TOTAL = {
         "15m": 1500, "30m": 1500, "1h": 1500,
         "2h":  1200, "4h":  1200, "8h": 1000,
         "1d":  800,  "1w":  400,
     }
-    bt_total = BT_TOTAL.get(interval, 1500)
+    bt_total = 0 if fast_mode else BT_TOTAL.get(interval, 1500)
     if bt_total > limit:
         df_bt = fetch_data_extended(symbol=symbol, interval=interval, total=bt_total)
         if df_bt.empty:
@@ -361,6 +488,9 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
             volume_profile=vp_data,
             oi_data=oi_data if oi_data else None,
             htf_direction=htf_direction,  # P0-2: HTF 门控
+            ls_ratio_data=ls_ratio_data if ls_ratio_data else None,
+            macro_data=macro_data if macro_data else None,
+            mc_n_sims=300 if fast_mode else 1500,
         )
 
     # 准备图表用的 K 线数据（带指标值）
@@ -412,65 +542,100 @@ def run_single_tf(symbol, interval, limit, label, chart_show, sr_lb, sr_pn, sr_c
 # 后台分析线程
 # ─────────────────────────────────────────────
 
+_first_run_done: set = set()   # 已完成首轮快速分析的币种集合
+
 def _analyze_symbol(symbol: str) -> None:
     """单个币种的完整分析任务；设计为可在线程池中并行运行。"""
     with _lock:
         _cache[symbol]["updating"] = True
 
-    print(f"[服务器] 正在分析 {symbol}...")
+    # 首轮用 fast_mode（limit=200, mc_n_sims=300, 跳过扩展拉取），优先出结果
+    fast_mode = symbol not in _first_run_done
+
+    print(f"[服务器] 正在分析 {symbol}{'（快速首轮）' if fast_mode else ''}...")
     cur_tf   = _cache[symbol].get("timeframes", {})  # 当前缓存的各周期数据
     new_tf   = {}
     now_ts   = time.time()
     skipped  = []
     fetched  = []
 
-    # 判断是否有需要更新的短周期 TF（决定是否取 OB 数据，避免不必要的深度请求）
-    needs_ob = any(
+    # ── 预取阶段：OB / OI / L/S Ratio / Macro / Liq 全部并发 ─────────
+    # fast_mode 下跳过慢接口（OB depth weight=2，macro 需打外部 API），优先速度
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    needs_ob = (not fast_mode) and any(
         now_ts - cur_tf.get(iv, {}).get("_fetched_at", 0) >= _TF_TTL.get(iv, 300)
         for iv, *_ in TIMEFRAMES
         if _OB_TF_WEIGHTS.get(iv, 0.0) > 0
     )
 
-    ob_walls  = []
-    ob_raw    = None
-    if needs_ob:
-        _rate_limiter.acquire(2)   # depth 接口权重较重，消耗 2 个令牌
-        ob_walls, ob_raw = fetch_ob_walls(symbol)
-        if ob_walls:
-            print(f"[服务器] {symbol} OB 挂单墙: {len(ob_walls)} 个价格层")
+    def _fetch_ob():
+        if not needs_ob:
+            return [], None
+        _rate_limiter.acquire(2)
+        return fetch_ob_walls(symbol)
 
-    # ── 订单簿压力指数（基于同一次深度快照）─────────────────
+    def _fetch_oi():
+        return fetch_open_interest(symbol)
+
+    def _fetch_ls():
+        if fast_mode:
+            return None
+        return fetch_ls_ratio(symbol)
+
+    def _fetch_macro():
+        if fast_mode:
+            return {}
+        return fetch_macro_data()
+
+    def _fetch_liq():
+        clusters = get_liq_clusters(symbol, hours=24, top_n=10)
+        if not clusters:
+            with _lock:
+                tf_snap = _cache.get(symbol, {}).get("timeframes", {})
+            clusters = estimate_liq_clusters_from_sr(symbol, tf_snap)
+        return clusters
+
+    with _TPE(max_workers=5) as _pre_ex:
+        _f_ob    = _pre_ex.submit(_fetch_ob)
+        _f_oi    = _pre_ex.submit(_fetch_oi)
+        _f_ls    = _pre_ex.submit(_fetch_ls)
+        _f_macro = _pre_ex.submit(_fetch_macro)
+        _f_liq   = _pre_ex.submit(_fetch_liq)
+
+        ob_walls, ob_raw    = _f_ob.result()
+        oi_data             = _f_oi.result()
+        ls_ratio_data       = _f_ls.result()
+        macro_data          = _f_macro.result()
+        liq_clusters_now    = _f_liq.result()
+
+    # OB 压力指数（基于深度快照，纯 CPU 计算，无需并发）
     ob_pressure_now = None
     if ob_raw:
         ob_pressure_now = calculate_ob_pressure(
             ob_raw.get("bids", []), ob_raw.get("asks", [])
         )
         if ob_pressure_now:
-            # 追加时间戳供前端显示
             ob_pressure_now["ts"] = datetime.now().strftime("%H:%M:%S")
-            # 追加到历史队列（最多 5 个快照），用于后续速度计算
             _ob_pressure_history[symbol].append(ob_pressure_now["ratio"])
-            # 速度：当前 ratio 与最近历史均值之差，正 = 买压增强，负 = 买压减弱
             hist = list(_ob_pressure_history[symbol])
             if len(hist) >= 2:
                 ob_pressure_now["velocity"] = round(hist[-1] - sum(hist[:-1]) / len(hist[:-1]), 3)
             else:
                 ob_pressure_now["velocity"] = 0.0
-            print(f"[服务器] {symbol} OB压力指数: ratio={ob_pressure_now['ratio']} score={ob_pressure_now['score']} v={ob_pressure_now['velocity']}")
 
-    # ── 持仓量（OI）快照 ─────────────────────────────────────
-    oi_data = fetch_open_interest(symbol)
+    # 简要日志
+    if ob_walls:
+        print(f"[服务器] {symbol} OB挂单墙: {len(ob_walls)}个")
     if oi_data.get("current"):
         print(f"[服务器] {symbol} OI: {oi_data['current']:,.0f} BTC")
-
-    # 拉取最近 24h 清算数据（先取 WS 真实数据，不足则用估算兜底）
-    liq_clusters_now = get_liq_clusters(symbol, hours=24, top_n=10)
-    if not liq_clusters_now:
-        with _lock:
-            tf_snap = _cache.get(symbol, {}).get("timeframes", {})
-        liq_clusters_now = estimate_liq_clusters_from_sr(symbol, tf_snap)
+    if ls_ratio_data:
+        _tp = ls_ratio_data.get("top_position", [{}])
+        _gr = ls_ratio_data.get("global", [{}])
+        print(f"[服务器] {symbol} 多空比: 大户仓={float((_tp[-1] if _tp else {}).get('longShortRatio', 0)):.3f} "
+              f"散户={float((_gr[-1] if _gr else {}).get('longShortRatio', 0)):.3f}")
     if liq_clusters_now:
-        print(f"[服务器] {symbol} 清算密集区: {len(liq_clusters_now)} 个 (来源: {liq_clusters_now[0].get('source','?')})")
+        print(f"[服务器] {symbol} 清算密集区: {len(liq_clusters_now)}个 (来源: {liq_clusters_now[0].get('source','?')})")
 
     # ── P0-2: 第一轮——先跑 HTF（1d/1w），提取大方向，再跑 LTF ──────
     HTF_INTERVALS = {"1d", "1w"}
@@ -492,7 +657,10 @@ def _analyze_symbol(symbol: str) -> None:
                 result = run_single_tf(symbol, interval, limit, label,
                                        chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
                                        ob_walls=ob_walls, liq_clusters=liq_clusters_now,
-                                       oi_data=oi_data, htf_direction="neutral")
+                                       oi_data=oi_data, htf_direction="neutral",
+                                       ls_ratio_data=ls_ratio_data,
+                                       macro_data=macro_data,
+                                       fast_mode=fast_mode)
                 if result:
                     result["_fetched_at"] = now_ts
                     htf_result[interval]  = result
@@ -519,35 +687,53 @@ def _analyze_symbol(symbol: str) -> None:
     print(f"[MTF] {symbol} HTF方向: {htf_direction} "
           f"(日线{_daily_score:+d}×0.7 + 周线{_weekly_score:+d}×0.3 = {_htf_raw:+.1f})")
 
-    # ── 第二轮——LTF 传入 htf_direction，门控在 generate_report 内部生效 ──
+    # ── 第二轮——LTF 并发分析（HTF 方向已确定，各 LTF 彼此独立可并行）──
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ltf_tasks = []   # (interval, label, cached, tf_params)
     for interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb in TIMEFRAMES:
         if interval in HTF_INTERVALS:
-            continue   # 已在第一轮处理
+            continue
         cached = cur_tf.get(interval, {})
         age    = now_ts - cached.get("_fetched_at", 0)
         ttl    = _TF_TTL.get(interval, 300)
-
         if age < ttl:
             new_tf[interval] = cached
             skipped.append(interval)
-            continue
+        else:
+            ltf_tasks.append((interval, limit, label, chart_show,
+                               sr_lb, sr_pn, sr_cluster_pct, fib_lb, cached))
 
+    def _run_ltf(args):
+        interval, limit, label, chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb, cached = args
         _rate_limiter.acquire(1)
         try:
             result = run_single_tf(symbol, interval, limit, label,
                                    chart_show, sr_lb, sr_pn, sr_cluster_pct, fib_lb,
                                    ob_walls=ob_walls, liq_clusters=liq_clusters_now,
-                                   oi_data=oi_data, htf_direction=htf_direction)
+                                   oi_data=oi_data, htf_direction=htf_direction,
+                                   ls_ratio_data=ls_ratio_data,
+                                   macro_data=macro_data,
+                                   fast_mode=fast_mode)
             if result:
                 result["_fetched_at"] = now_ts
-                new_tf[interval] = result
-                fetched.append(interval)
-            elif cached:
-                new_tf[interval] = cached
+                return interval, label, result, None
+            return interval, label, cached, None
         except Exception as e:
-            print(f"[服务器] {symbol} {label} 分析失败: {e}")
-            if cached:
-                new_tf[interval] = cached
+            return interval, label, cached, e
+
+    if ltf_tasks:
+        # 最多 6 个线程（LTF 周期数），I/O 密集型任务线程并行效果好
+        with ThreadPoolExecutor(max_workers=min(len(ltf_tasks), 6)) as _ltf_ex:
+            futures = {_ltf_ex.submit(_run_ltf, t): t[0] for t in ltf_tasks}
+            for fut in as_completed(futures):
+                interval, label, result, err = fut.result()
+                if err:
+                    print(f"[服务器] {symbol} {label} 分析失败: {err}")
+                if result:
+                    new_tf[interval] = result
+                    if not err:
+                        fetched.append(interval)
 
     if skipped:
         print(f"[服务器] {symbol} TTL 内跳过: {', '.join(skipped)}")
@@ -608,7 +794,16 @@ def _analyze_symbol(symbol: str) -> None:
         if ob_pressure_now is not None:
             _cache[symbol]["ob_pressure"] = ob_pressure_now
 
-    print(f"[服务器] {symbol} 完成")
+    # 首轮完成后标记，下一轮将使用完整参数重新计算
+    if fast_mode:
+        _first_run_done.add(symbol)
+        print(f"[服务器] {symbol} 快速首轮完成，后台立即补算完整版本...")
+        import threading
+        threading.Thread(target=_analyze_symbol, args=(symbol,), daemon=True).start()
+    else:
+        print(f"[服务器] {symbol} 完成")
+        # 完整版本分析结束后持久化到磁盘，供下次重启秒级恢复
+        _save_disk_cache()
 
 
 def analysis_worker():
@@ -1561,6 +1756,9 @@ def funding_data():
     # ── 期现价差（季度合约 Basis）────────────────────────────────────────
     result["basis"] = _fetch_basis(symbol)
 
+    # ── 多空比（大户账户/持仓，供盘口汇总页使用）────────────────────────
+    result["ls_ratio"] = fetch_ls_ratio(symbol)
+
     # ── 清算密集区（双源：WebSocket 实时累积 + OI估算兜底）────────────
     ws_clusters = get_liq_clusters(symbol, hours=24, top_n=7)
     liq_stats   = get_liq_stats(symbol)
@@ -1637,6 +1835,89 @@ def onchain():
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e), "source": "coinmetrics"}), 500
+
+
+# ─────────────────────────────────────────────
+# 盘口分析页面 + API
+# ─────────────────────────────────────────────
+
+@app.route("/orderbook")
+def orderbook_page():
+    return render_template("orderbook.html")
+
+
+@app.route("/api/orderbook")
+def api_orderbook():
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    limit  = min(int(request.args.get("limit", 20)), 100)
+
+    if symbol in FUTURES_SYMBOLS:
+        url = "https://fapi.binance.com/fapi/v1/depth"
+    else:
+        url = "https://api.binance.com/api/v3/depth"
+
+    try:
+        r = req.get(url, params={"symbol": symbol, "limit": 1000}, timeout=5)
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    bids_raw = [[float(p), float(q)] for p, q in raw.get("bids", [])[:limit]]
+    asks_raw = [[float(p), float(q)] for p, q in raw.get("asks", [])[:limit]]
+
+    all_bids = [[float(p), float(q)] for p, q in raw.get("bids", [])]
+    all_asks = [[float(p), float(q)] for p, q in raw.get("asks", [])]
+    pressure = calculate_ob_pressure(all_bids, all_asks)
+
+    walls_list, _ = fetch_ob_walls(symbol)
+    walls = {"bids": [], "asks": []}
+    for price, weight, side_label in (walls_list or []):
+        side = "bids" if side_label == "orderbook_bid" else "asks"
+        walls[side].append({"price": price, "weight": weight})
+    walls["bids"].sort(key=lambda x: x["price"], reverse=True)
+    walls["asks"].sort(key=lambda x: x["price"])
+
+    return jsonify({
+        "symbol":   symbol,
+        "ts":       int(time.time() * 1000),
+        "bids":     bids_raw,
+        "asks":     asks_raw,
+        "walls":    walls,
+        "pressure": pressure,
+    })
+
+
+@app.route("/api/trades/recent")
+def api_trades_recent():
+    symbol   = request.args.get("symbol", "BTCUSDT").upper()
+    min_usdt = float(request.args.get("min_usdt", 50000))
+
+    if symbol in FUTURES_SYMBOLS:
+        url = "https://fapi.binance.com/fapi/v1/aggTrades"
+    else:
+        url = "https://api.binance.com/api/v3/aggTrades"
+
+    try:
+        r = req.get(url, params={"symbol": symbol, "limit": 500}, timeout=5)
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    trades = []
+    for t in raw:
+        price = float(t["p"]); qty = float(t["q"]); usdt = price * qty
+        if usdt >= min_usdt:
+            trades.append({
+                "time":     t["T"],
+                "price":    price,
+                "qty":      round(qty, 4),
+                "usdt":     round(usdt),
+                "is_buyer": not t["m"],  # m=True → maker is buyer → taker sold
+            })
+    trades.sort(key=lambda x: x["time"], reverse=True)
+    return jsonify({"symbol": symbol, "trades": trades[:100]})
 
 
 # ─────────────────────────────────────────────
